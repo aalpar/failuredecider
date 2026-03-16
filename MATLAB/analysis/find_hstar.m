@@ -24,7 +24,7 @@ function [h_star, details] = find_hstar(sys_type, params)
 
             h_star = D_prime * W / (2 * f);
             details.h_star_pages = h_star;
-            details.h_star_MB = h_star * 4 / 1024;
+            details.h_star_MB = h_star * 4 / 1000;
             details.h_star_pct = h_star / S * 100;
             details.msg = sprintf('E* = %.1f MB (%.4f%% of physical memory)', ...
                 details.h_star_MB, details.h_star_pct);
@@ -36,7 +36,7 @@ function [h_star, details] = find_hstar(sys_type, params)
         case 'oom'
             h_star = params.mem_freed;
             details.msg = sprintf('Cascade when alloc_on_restart >= %d pages (%.1f MB)', ...
-                h_star, h_star * 4 / 1024);
+                h_star, h_star * 4 / 1000);
 
         case 'cassandra'
             % linspace(a, b, n) creates n evenly-spaced points between a and b. Used here to sweep replay rates.

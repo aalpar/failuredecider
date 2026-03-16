@@ -73,7 +73,7 @@ function results = derive_swap_hstar()
         for j = 1:2
             D_val = D_primes(j);
             E_star_val = D_val * S_val / (2 * f_val);
-            E_star_MB = E_star_val * 4 / 1024;
+            E_star_MB = E_star_val * 4 / 1000;
             E_star_pct = E_star_val / S_val * 100;
 
             if j == 1

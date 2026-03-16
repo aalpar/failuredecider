@@ -213,8 +213,11 @@ recovery in the linearized model developed in \cref{sec:gain-matrix};
 
 \subsection{Precondition: You Need a Resource Model}
 
-Before evaluating any level, the system must answer a basic question:
+Before evaluating any level, the system should answer a basic question:
 \emph{recovery costs what, measured in what units, against what capacity?}
+Systems that lack a complete resource model can still be evaluated informally
+against levels~1--3, but the results are weaker---statements about conceptual
+boundedness rather than measured guarantees.
 
 The system must name its bottleneck resource, measure its total capacity, and
 express both normal operations and recovery actions in the same units against
@@ -432,7 +435,7 @@ Level & Condition & TCP & Hinted handoff & OOM killer \\
 2 & Aggregate: recovery rate $\leq$ freed capacity
   & \checkmark\ exponential backoff
   & $\times$\ burst on return
-  & \checkmark\ single kill \\
+  & \checkmark$^\dagger$\ single kill \\
 3 & Feedback: recovery gain $< 1$
   & \checkmark\ backoff reduces congestion
   & $\times$\ replay triggers read repair cascade
@@ -440,6 +443,10 @@ Level & Condition & TCP & Hinted handoff & OOM killer \\
 \bottomrule
 \end{tabularx}
 \end{small}
+
+\noindent$^\dagger$Per-event only. Under sustained pressure the OOM killer fires
+repeatedly (kill $\to$ restart $\to$ kill); the feedback loop that makes this
+aggregate behavior dangerous is captured by level~3.
 
 The recovery invariant tells you whether recovery \emph{is} safe. It does not
 tell you whether it will \emph{stay} safe, or what to do when it is not. A
@@ -833,7 +840,7 @@ value among its eigenvalues).
 \end{quote}
 
 For a single resource, $\mathbf{G}$ is scalar and the condition reduces to
-$G < 1$. For multiple resources, the spectral radius captures cross-resource
+$|G| < 1$. For multiple resources, the spectral radius captures cross-resource
 feedback: even if each diagonal entry $G_{ii} < 1$, the system cascades when
 off-diagonal entries are large enough---$G_{12} \cdot G_{21} \geq 1$ means
 resource~1's recovery stresses resource~2, whose recovery stresses resource~1.
@@ -1011,8 +1018,14 @@ relatively more expensive as headroom shrinks---true for every system in this
 paper except TCP---then $\rho(\mathbf{G})$ is non-decreasing in load. The
 boundary $\mathbf{h}^*$ is a clean phase transition: stable on one side, cascade
 on the other. The nonlinear system may reach instability sooner than the
-linearization predicts, but it cannot reach stability later. The linear analysis
-is a lower bound on stability---the safe direction for engineering.
+linearization predicts (a large perturbation can cross $\mathbf{h}^*$ even from
+a locally stable operating point), and once past $\mathbf{h}^*$ it cannot
+self-rescue. The linearized $\mathbf{h}^*$ is therefore a necessary condition
+for stability, not a sufficient one: resistance to large perturbations requires
+headroom margin beyond $\mathbf{h}^*$. The linear analysis never gives false
+instability warnings---if $\rho(\mathbf{G}) \geq 1$, the system \emph{will}
+cascade---but it can give false assurance of robustness when the basin of
+attraction is smaller than the perturbation.
 
 \paragraph{Quantitative margins.} For exact convergence rates, overshoot, or
 dynamics near $\rho(\mathbf{G}) = 1$, Lyapunov stability analysis provides the
