@@ -1,3 +1,6 @@
+# macOS
+.DS_Store
+
 # LaTeX build artifacts
 *.aux
 *.bbl
@@ -22,3 +25,9 @@ slprj/
 *.mexa64
 *.mexmaci64
 *.mexw64
+*.mat
+*.asv
+*.mlx~
+
+# Simulink cache
+*.slxc
