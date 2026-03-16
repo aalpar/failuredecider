@@ -1,0 +1,22 @@
+⏺ Clean. The formal references thread through without disrupting the prose flow. Here's what each edit does:
+
+  - Precondition (line 220): adds Cᵢ, wᵢ(t), rᵢ(t), hᵢ(t) definitions with "Section 3 formalizes this"
+  - Level 1 (line 228): introduces the cost vector δ(a) inline
+  - Level 2 (line 238): adds hᵢ(t) ≥ 0 as the formal condition
+  - Level 3 (line 250): adds ρ(G) < 1 as the formal condition
+  - Summary table (lines 269–274): Condition column now leads with formal notation (Cᵢ/wᵢ/rᵢ, δ(a), hᵢ(t) ≥ 0, ρ(G) < 1)
+  - Cross-resource paragraph (line 278): replaces "the resource model breaks" with reference to the multi-resource gain matrix and h* computation — the formal framework handles the cross-resource case rather than
+  calling it a limitation
+
+  ★ Insight ─────────────────────────────────────
+  The threading creates two reading paths through Sections 3–4. A reader who skips Section 3 gets the verbal definitions and examples in Section 4 — still coherent, still useful. A reader who reads Section 3 first
+  encounters the formal symbols in Section 4 as familiar notation, and the examples become substitutions into the formalism rather than standalone claims. The summary table now works as a quick reference for both
+  audiences: the formal condition tells you what to check, the system columns tell you what happens when you do.
+  ─────────────────────────────────────────────────
+
+  One thing I noticed while re-reading: the quiesced recovery note (line 276) could reference the formalism too — quiesced recovery works because wᵢ(t) = 0, so hᵢ(t) = Cᵢ − rᵢ(t), and the entire capacity is
+  available. But it's already clear as-is. Worth adding, or leave it?
+
+✻ Brewed for 2m 21s
+
+❯ leave it for now.

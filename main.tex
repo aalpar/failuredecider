@@ -1,0 +1,1023 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{enumitem}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+\newtheorem{theorem}{Theorem}
+
+\title{Don't Let Your System Decide It's Dead}
+\author{Aaron H. Alpar\\Independent Researcher}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Distributed systems fail in two ways: the failure itself, and the system's
+automatic response to the failure. The second is often worse. The root cause is
+systems making semantic decisions with insufficient information---promoting
+``slow'' to ``dead'' based on wall-clock constants rather than measured resource
+models. This paper identifies a precise invariant---the \emph{recovery
+invariant}---that separates safe automatic recovery from cascading failure, and
+a design principle---the \emph{compensation boundary}---that determines who
+should make which decisions. The recovery invariant has three levels: individual
+cost boundedness, aggregate rate boundedness, and feedback stability (spectral
+radius of the recovery gain matrix less than one). The compensation boundary is
+the architectural point where a system stops surfacing failure to a higher
+authority and starts acting on it automatically. We analyze TCP's retransmission
+timeout as a reference design that satisfies all three levels, and show how
+Cassandra's hinted handoff, UNIX swap and OOM killer, and wall-clock-based
+tombstone garbage collection violate them. We connect this framework to the
+metastable failures literature, resilience engineering, and control theory, and
+apply the principles to CRDT tombstone garbage collection as a case study.
+\end{abstract}
+
+\section{Introduction}
+
+Distributed systems fail in two ways: the failure itself, and the system's
+automatic response to the failure. The second is often worse.
+
+The root cause is systems making semantic decisions with insufficient
+information---promoting ``slow'' to ``dead'' based on wall-clock constants
+rather than measured resource models. There is a precise invariant that
+separates safe automatic recovery from cascading failure, and a design principle
+that tells you who should make which decisions. Most production systems violate
+both.
+
+\section{The Setup: A Configuration Parameter That Eats Your Data}
+
+Cassandra has a setting called \texttt{gc\_grace\_seconds}. It defaults to
+864,000---ten days. Here is what it does: when you delete a row, Cassandra does
+not remove it. It writes a \emph{tombstone}---a marker that says ``this key was
+deleted.'' Tombstones exist because in an eventually consistent system, if you
+just remove the data, another replica that has not heard about the deletion will
+happily replicate the old value back. The tombstone is the deletion's proof of
+existence.
+
+\texttt{gc\_grace\_seconds} is how long Cassandra keeps that proof around.
+After ten days, Cassandra garbage-collects the tombstone. The assumption: repair
+has propagated the tombstone to all replicas within that window.
+
+If repair did not run---or did not finish---within those ten days, the tombstone
+disappears from some replicas while the pre-delete value still exists on others.
+The deleted data silently reappears. This is a well-documented production
+failure mode.
+
+What just happened? A single wall-clock constant made two different decisions
+simultaneously:
+
+\begin{enumerate}
+  \item \textbf{A local decision}: ``This tombstone's storage can be
+    reclaimed.'' (Garbage collection---the system has the information to do
+    this.)
+  \item \textbf{A semantic decision}: ``All replicas have observed this
+    deletion.'' (Replication state---the system is \emph{guessing}.)
+\end{enumerate}
+
+These are different decisions requiring different information. Conflating them is
+the root of most cascading failures in distributed systems, and the pattern
+repeats everywhere: timeouts that promote ``slow'' to ``dead,'' OOM killers that
+choose which process to sacrifice, swap systems that silently trade memory
+bandwidth for disk bandwidth until everything grinds to a halt.
+
+This paper is about drawing the line correctly.
+
+\section{The Two Decisions}
+
+Every failure in a distributed system requires two decisions:
+
+\begin{enumerate}
+  \item \textbf{The local decision}: ``This connection/request/operation has
+    failed.''
+  \item \textbf{The semantic decision}: ``This node/peer/service is gone and I
+    should act accordingly.''
+\end{enumerate}
+
+The first is a statement about what the system has observed. The second is an
+interpretation of what that observation \emph{means}. They require different
+information, are made at different layers, and have different consequences when
+wrong.
+
+Getting the local decision wrong is usually cheap---a spurious timeout, a wasted
+retry. Getting the semantic decision wrong can be catastrophic---deleted data
+resurrected, a healthy node declared dead and its traffic redistributed into an
+already-overloaded cluster, a cascade that turns a minor hiccup into a major
+outage.
+
+The engineering challenge is that the semantic decision is \emph{tempting} to
+automate. Manual intervention is slow. Operators are expensive. And most of the
+time, the guess is right---the node really is dead, repair really did finish,
+the process really was misbehaving. Systems are designed for the common case,
+and the common case makes automation look safe. The failure modes live in the gap
+between ``usually right'' and ``always right.''
+
+\section{TCP Got This Right (Mostly)}
+
+TCP's retransmission timeout is the gold standard for automatic failure
+decisions. It gets nearly everything right, and examining \emph{why} reveals the
+principles that other systems violate.
+
+\textbf{Derived from measurement, not magic constants.} TCP's retransmission
+timeout (RTO) is computed from Jacobson's round-trip time (RTT) estimator---a
+smoothed average plus variance of measured round-trip times. The timeout tracks
+actual network behavior, not an engineer's guess about what it should be.
+
+\textbf{Individual recovery cost is bounded and known.} A single retransmission
+costs one segment---fixed, known in advance, expressed in the same units as
+normal operation.
+
+\textbf{Recovery never amplifies the failure.} Exponential backoff ensures the
+retry \emph{rate} converges to zero. Each successive timeout doubles the wait.
+The more congested the network, the less recovery traffic TCP adds to it.
+
+\textbf{Failure is surfaced, not hidden.} When TCP exhausts its retries, the
+application gets \texttt{ETIMEDOUT}. TCP does not guess what the timeout
+\emph{means}---it tells the application ``this connection is dead'' and lets the
+application decide whether to reconnect, try a different server, or alert an
+operator.
+
+TCP separates the layers cleanly:
+
+\begin{itemize}
+  \item \textbf{TCP decides}: ``This connection is dead.'' (It has the
+    information: measured RTT, retry history, bounded retransmission cost.)
+  \item \textbf{Application decides}: ``What does this dead connection mean?''
+    (It has the context: service topology, redundancy, retry policy.)
+  \item \textbf{Neither decides}: ``This node is permanently gone.'' (This
+    requires physical-world knowledge---hardware state, operator intent---that
+    no software layer has.)
+\end{itemize}
+
+There is a nuance most people miss: TCP \emph{does} eventually give up
+automatically. \texttt{tcp\_retries2} defaults to 15 retries, which works out to
+roughly 13--30 minutes depending on measured RTT. This is a wall-clock timeout,
+but grounded in a measured resource model---derived from observed network
+behavior, not pulled from thin air.
+
+\subsection{Why This Separation Is Provably Necessary}
+\label{sec:flp}
+
+\subsubsection{The Impossibility Result}
+
+The FLP impossibility result~\cite{fischer1985impossibility} proves that in an
+asynchronous system where at least one process may crash, no deterministic
+algorithm can guarantee consensus. The load-bearing assumption is
+\emph{asynchrony}: with no bound on message delay or processing time, you cannot
+distinguish a crashed process from a slow one.
+
+TCP operates \emph{within} the bounds where this distinction is tractable---it
+measures RTT, so it has a probabilistic model of ``how slow is normal.'' But the
+question ``is this node permanently gone?'' lives in the asynchronous regime
+where FLP applies. No amount of measurement resolves it, because the relevant
+information (hardware failure, network partition, operator intent) is outside the
+system's observation boundary.
+
+This is the theoretical foundation for the rest of the argument: systems that
+promote ``slow'' to ``dead'' automatically are not just making a bad engineering
+choice---they are making a decision that is \emph{provably underdetermined} by
+the information available to them. The correct response is the one TCP models:
+decide what you can (connection liveness), surface what you cannot
+(\texttt{ETIMEDOUT}), and let the layer with more information make the semantic
+call.
+
+\subsubsection{The Workaround}
+
+Chandra and Toueg~\cite{chandra1996unreliable} formalized the workaround: you
+can solve consensus if you have a \emph{failure detector} with known properties
+(completeness and accuracy). Different detector strengths enable different
+guarantees. This maps directly to the layered model above---each layer is a
+failure detector with a specific information boundary, and the system's
+correctness depends on no layer exceeding its boundary.
+
+\section{The Recovery Invariant}
+
+TCP's design is not just good engineering intuition---it satisfies a precise
+invariant that separates safe automatic recovery from cascading failure. The
+invariant has three levels. Each is necessary; only all three together are
+sufficient.
+
+\subsection{Precondition: You Need a Resource Model}
+
+Before evaluating any level, the system must answer a basic question:
+\emph{recovery costs what, measured in what units, against what capacity?}
+
+The system must name its bottleneck resource, measure its total capacity, and
+express both normal operations and recovery actions in the same units against
+that capacity.
+
+TCP has an explicit resource model: bandwidth, measured in segments per
+round-trip. One normal packet and one retransmission cost the same unit---one
+segment---against a known link capacity.
+
+Cassandra's hinted handoff has a partial model: one hint replay costs roughly
+one write in I/O operations per second (IOPS). But the available IOPS during
+replay depend on concurrent read load, compaction, and repair---variables the
+hint replay system does not observe.
+
+The OOM killer has almost no resource model: it knows system-wide memory
+pressure triggered the kill, but the cost of killing a specific process (how
+much memory is freed, how long until the supervisor restarts it, what the restart
+will allocate) depends on external state the kernel does not track.
+
+The precondition is what separates systems that \emph{can} reason about recovery
+cost from those that act and hope.
+
+\subsubsection{Formal Framework: Bandwidth as Primitive}
+\label{sec:bandwidth}
+
+Every system resource has a consumption rate expressible as bandwidth:
+\textbf{units of resource per unit time}.
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Resource & Bandwidth unit \\
+\midrule
+Network  & bytes/sec or segments/RTT \\
+Disk I/O & IOPS or bytes/sec \\
+CPU      & utilization (dimensionless rate) \\
+Memory   & pages/sec (fault-in rate) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For pure-flow resources (network, CPU), bandwidth \emph{is} the resource. There
+is no at-rest state---a CPU cycle is consumed or not, a packet is in flight or
+not.
+
+For stock resources (memory capacity, disk space), the at-rest state is the
+integral of past bandwidth:
+\begin{equation}
+  S(t) = \int_0^t b_{\mathrm{net}}(\tau)\,d\tau
+\end{equation}
+where $b_{\mathrm{net}}$ is the net consumption rate (allocation rate minus free
+rate). Every physical memory page was populated through a page fault---zero-fill
+or disk read---that consumed memory bus bandwidth and potentially disk bandwidth.
+Virtual address space can be reserved without bandwidth (\texttt{malloc} with
+overcommit returns immediately), but physical resource consumption always goes
+through bandwidth.
+
+This unification matters: the recovery invariant constrains rates. Stocks enter
+only as boundary conditions on accumulated rates.
+
+\subsubsection{Multi-Resource Model}
+\label{sec:multi-resource}
+
+A system has $n$ resources. At time $t$:
+
+\begin{itemize}[nosep]
+  \item $C_i$: capacity of resource $i$ (bandwidth ceiling, in
+    $\mathrm{units}_i/\mathrm{sec}$)
+  \item $w_i(t)$: bandwidth consumed by normal operations on resource $i$
+  \item $r_i(t)$: bandwidth consumed by recovery actions on resource $i$
+  \item $h_i(t) = C_i - w_i(t) - r_i(t)$: headroom on resource $i$
+\end{itemize}
+
+These form vectors $\mathbf{C}$, $\mathbf{w}(t)$, $\mathbf{r}(t)$,
+$\mathbf{h}(t) \in \mathbb{R}^n$. For stock resources, an additional integral
+constraint applies:
+\begin{equation}
+  \int_0^t b_{i,\mathrm{net}}(\tau)\,d\tau \leq S_i
+\end{equation}
+
+Recovery is safe when both conditions hold on every resource:
+\begin{enumerate}
+  \item $h_i(t) \geq 0$ at all $t$ (bandwidth not exceeded)
+  \item $\int_0^t b_{i,\mathrm{net}}(\tau)\,d\tau \leq S_i$ for stock resources
+    (capacity not exhausted)
+\end{enumerate}
+
+The bottleneck is whichever resource hits either constraint first. It is
+emergent, not fixed---recovery actions can shift the bottleneck from one resource
+to another.
+
+\subsection{Level 1: Individual Bound}
+
+\begin{quote}
+Each recovery action's resource cost must be bounded and known.
+\end{quote}
+
+This is the weakest condition. You must know what a single compensating action
+costs before you trigger it.
+
+TCP satisfies this: one retransmission costs one segment---fixed, known,
+independent of system state. Cassandra's hinted handoff satisfies this too: one
+hint replay costs approximately one write. The OOM killer satisfies this: one
+kill frees the memory of one process.
+
+Every system discussed in this paper passes level~1. That is why it is
+insufficient. A system can have individually cheap recovery actions and still
+cascade---the danger is in their aggregate behavior.
+
+\subsection{Level 2: Aggregate Bound}
+
+\begin{quote}
+At any point in time, the rate of resource consumption by all concurrent
+recovery actions must remain below the rate of resource freed by the failures
+they compensate for.
+\end{quote}
+
+This is the burst dimension. The distinction between ``amortized OK'' and
+``worst-case catastrophic'' lives here.
+
+TCP satisfies this: exponential backoff ensures the \emph{rate} of
+retransmissions decreases with each round, so aggregate retry bandwidth shrinks
+over time. Google's SRE retry budget is an explicit level-2 mechanism---capping
+retries at 10\% of total requests bounds the aggregate cost to 1.1$\times$
+normal load regardless of failure count.
+
+Cassandra's hinted handoff violates this: hints accumulate linearly during a
+node's absence and replay in a burst on return. A 10-minute outage at 100~Mbps
+per node produces ${\sim}7$~GiB of hints; at the default 1024~kbps throttle,
+replay takes ${\sim}2$~hours. If the throttle is raised (as operators under
+pressure often do), the burst can recreate the overload that caused the original
+failure.
+
+\subsection{Level 3: Feedback Bound}
+
+\begin{quote}
+Recovery actions must not create conditions that trigger further failures.
+Equivalently: the recovery feedback loop must have gain $< 1$.
+\end{quote}
+
+Levels 1 and 2 treat recovery actions as independent events. Level~3 asks
+whether they interact. A system violates level~3 when recovery actions consume
+the same resources that are under contention, creating a positive feedback loop:
+failure $\to$ recovery $\to$ more contention $\to$ more failure.
+
+TCP satisfies this: backoff \emph{reduces} congestion on the link, which reduces
+the condition (congestion) that caused the timeout in the first place. The
+feedback loop is damped---each iteration moves the system closer to equilibrium,
+not further.
+
+The OOM killer can violate this: a process supervisor restarts the killed
+process, which allocates memory, which recreates the pressure that triggered the
+kill. The feedback loop gain depends on external configuration (supervisor
+policy) that the kernel does not know about---another instance of a system making
+decisions outside its information boundary.
+
+Cassandra's hinted handoff can violate this: burst replay causes CPU/IO
+contention $\to$ read latencies spike $\to$ read timeouts trigger read repairs
+$\to$ read repairs consume more CPU/IO $\to$ more timeouts. The recovery action
+for writes triggers a cascade in the read path.
+
+\paragraph{The decompensation cascade} is what a level~3 violation looks like in
+practice:
+
+\begin{enumerate}
+  \item System overloaded $\to$ operations slow down
+  \item Timeouts fire $\to$ compensating actions triggered
+  \item Compensating actions consume the bottleneck resource $\to$ more
+    contention
+  \item More timeouts $\to$ more compensating actions $\to$ feedback gain
+    $\geq 1$ $\to$ cascade
+\end{enumerate}
+
+Systems designed for ``graceful degradation'' often degrade ungracefully because
+the compensating actions were designed for the steady-state cost model (level~1
+holds, level~2 holds at low utilization), not the failure cost model (level~2
+breaks under burst, level~3 breaks under sustained pressure). David
+Woods~\cite{woods2015four,woods2018theory} calls this \emph{decompensation}---the
+exhaustion of adaptive capacity when the system's own recovery mechanisms become
+the dominant source of load.
+
+The metastable failures literature~\cite{bronson2021metastable,huang2022metastable}
+identifies the same phenomenon: ``the root cause of a metastable failure is the
+sustaining feedback loop, rather than the trigger.'' Their taxonomy of triggers
+(load-spiking vs.\ capacity-decreasing) and amplification mechanisms (workload
+amplification vs.\ capacity degradation) maps directly onto levels~2 and~3 of
+this invariant. The formalization in \cref{sec:gain-matrix} approaches the same
+problem from a different mathematical tradition---control theory and linear
+algebra rather than Markov chains and queuing theory.
+
+\paragraph{A note on quiesced recovery.} Some systems sidestep levels~2 and~3
+entirely by deferring recovery to a state where no production traffic competes
+for resources---replaying a write-ahead log on startup before accepting
+connections, running repair during a maintenance window, or batching
+reconciliation while the node is offline. When the competing workload is zero,
+level~2 is trivially satisfied and level~3's feedback loop is broken. This is
+effectively admission control: the system refuses new work until recovery is
+complete. The trade-off is availability---the node is down during recovery.
+
+\subsection{Summary}
+
+\begin{small}
+\noindent\begin{tabularx}{\textwidth}{@{}lXXXX@{}}
+\toprule
+Level & Condition & TCP & Hinted handoff & OOM killer \\
+\midrule
+0 & Resource model: $C_i$, $w_i(t)$, $r_i(t)$ in shared bandwidth units
+  & \checkmark\ segments on a link
+  & $\times$\ partial: IOPS but not concurrent load
+  & $\times$\ memory freed unknown until kill \\
+1 & Individual: cost of one action bounded and known
+  & \checkmark\ one segment
+  & \checkmark\ one write
+  & \checkmark\ one kill \\
+2 & Aggregate: recovery rate $\leq$ freed capacity
+  & \checkmark\ exponential backoff
+  & $\times$\ burst on return
+  & \checkmark\ single kill \\
+3 & Feedback: recovery gain $< 1$
+  & \checkmark\ backoff reduces congestion
+  & $\times$\ replay triggers read repair cascade
+  & $\times$\ supervisor restarts killed process \\
+\bottomrule
+\end{tabularx}
+\end{small}
+
+The recovery invariant tells you whether recovery \emph{is} safe. It does not
+tell you whether it will \emph{stay} safe, or what to do when it is not. A
+system can satisfy all three levels at current load and violate them minutes
+later. That question---when to compensate automatically and when to stop and
+escalate---requires a different concept.
+
+\section{The Compensation Boundary}
+
+\begin{quote}
+The \emph{compensation boundary}\footnote{The term \emph{compensating action}
+originates in transaction processing, where a compensating transaction undoes
+the effects of a committed transaction that cannot be rolled
+back~\cite{gray1993transaction}. \emph{Decompensation}---the exhaustion of
+adaptive capacity when recovery mechanisms become the dominant load source---is
+David Woods' contribution (see \cref{sec:related-work}). The \emph{compensation
+boundary} as used here---the architectural point where the system stops
+surfacing failure and starts acting on it---is a framing specific to this paper,
+combining the transactional concept (what is a compensating action?) with the
+resilience engineering concept (when does compensation become the problem?) and
+adding the design question: \emph{where should the system draw that line?}} is
+the point in a system's architecture where it stops surfacing failure to a
+higher authority and starts acting on it automatically. Below the boundary,
+errors are reported---the caller decides. Above it, the system compensates
+silently---no one is asked.
+\end{quote}
+
+The placement of that boundary determines how the system fails under pressure.
+
+\subsection{z/OS: The Boundary Drawn Furthest Out}
+
+z/OS draws the compensation boundary furthest out of any system I know. WLM
+assigns work to service classes with defined goals; when the system cannot meet
+goals, it reports the shortfall rather than silently
+degrading.\footnote{WLM (Workload Manager) is the z/OS component that classifies
+work into service classes with defined performance goals (response time,
+velocity, discretionary) and dynamically manages system resources---CPU
+dispatching priority, I/O priority, memory---to meet those goals. When goals
+cannot be met, WLM reports the shortfall rather than silently degrading. See
+IBM, \emph{z/OS MVS Planning: Workload Management}, SC34-2662.} z/OS manages
+memory through explicit region sizes---exceed yours and the job abends (S878,
+S80A), surfacing a hard failure to the operator.
+
+XCF heartbeat failure detection declares a member dead (it has the information:
+heartbeat history, configurable intervals), but does not decide what the failure
+\emph{means} for application-level data---recovery exits handle that decision,
+and may themselves escalate.\footnote{XCF (Cross-system Coupling Facility)
+provides group membership, signaling, and heartbeat-based failure detection
+across z/OS systems within a sysplex. XCF monitors member health via
+configurable heartbeat intervals and declares a member failed when heartbeats
+stop---a local decision about connectivity. What that failure \emph{means} for
+application-level state is delegated to recovery exits registered by the
+application, not decided by XCF itself. See IBM, \emph{z/OS MVS Setting Up a
+Sysplex}, SA23-1399.} Automation is policy-driven (SA z/OS): an operator
+authored the rule, every automated action is logged, and when no policy matches,
+the system escalates rather than guessing.\footnote{SA z/OS (IBM System
+Automation for z/OS) is a policy-driven automation framework for z/OS
+operations. Operators author automation rules that define responses to system
+events; every automated action is logged and auditable. When no rule matches a
+condition, SA z/OS escalates to the operator rather than guessing. See IBM,
+\emph{System Automation for z/OS Planning and Installation}, SC34-2571.}
+
+The escalation mechanism itself is significant: WTO/WTOR (Write to Operator with
+Reply) is \emph{synchronous}---on critical decisions, the system issues a
+message and \textbf{waits for the operator to respond} before proceeding. The
+operator is in the control loop by design---consulted during the decision, not
+notified afterward.
+
+But z/OS is not immune. Under system-wide memory pressure, it pages to auxiliary
+storage silently. SRM---which coexists with WLM as its resource-allocation
+mechanism---swaps out entire address spaces based on system-wide monitoring
+(paging rates, UIC values, central storage demand). WLM sets policy goals; SRM
+decides the mechanics. That separation is itself an example of decision authority
+tracking information: WLM knows what matters to the workload, SRM knows what is
+happening to the hardware. But the swap-out is still an automatic decision about
+who gets to run. The compensation boundary is further out than UNIX's, not
+absent.
+
+\subsection{UNIX: A System at War with Itself}
+
+UNIX draws the boundary closer in, and the result is a system with a split
+personality.
+
+The syscall interface surfaces errors faithfully---\texttt{errno},
+\texttt{ENOSPC}, \texttt{ENOMEM} from \texttt{fork}, \texttt{SIGPIPE}, exit
+codes. This is the ``let the caller decide'' philosophy. But the resource
+management layer behind it hides scarcity, and virtual memory is the clearest
+example.
+
+When physical memory is exhausted, UNIX pages to disk---a compensating action
+designed to degrade rather than fail. The capacity model is straightforward:
+physical RAM plus swap, both measurable in bytes, upper bound known at boot. But
+the \emph{cost} model is incoherent. The system is not trading memory for disk
+\emph{space} (swap is pre-allocated); it is trading memory bandwidth for disk
+bandwidth. A memory access costs ${\sim}100$\,ns; a page fault to an HDD costs
+${\sim}10$\,ms; to NVMe, ${\sim}100$\,\textmu s. The compensating action
+substitutes a resource that is 1,000--100,000$\times$ slower per access, and the
+only unit that makes both sides commensurable is time---the one unit the system
+does not budget.
+
+Against the recovery invariant: Level~1 holds---one page swap frees one page of
+physical memory, bounded and known. Level~2 is conditional---it holds while disk
+I/O remains below saturation, but the system swaps without checking disk
+bandwidth. Level~3 breaks under pressure: swapping consumes both memory bandwidth
+(page copies) and disk bandwidth (I/O operations), slowing everything $\to$
+queues build $\to$ more memory allocated to pending work $\to$ more swapping.
+Thrashing is a level~3 violation---the recovery action amplifies the condition it
+compensated for.
+
+This is a defensible decision within UNIX's information boundary---the kernel
+knows about memory and disk, and paging is within its operational scope. It makes
+no semantic guess about the application. But acting within your boundary does not
+guarantee stability. Swap satisfies the invariant at low memory pressure and
+violates it under high pressure, and the system has no mechanism to predict the
+transition. The implicit stabilization mechanism is degradation itself: as
+everything slows, users give up, load drops. This is the \emph{absence} of
+admission control, not a form of it.
+
+The OOM killer is where the contradiction becomes explicit. When oversubscription
+hits the wall, Linux makes an automatic semantic decision with unbounded
+consequences---it kills a \emph{different} process than the one that caused the
+pressure, chosen by heuristic (\texttt{oom\_badness} scoring, primarily by
+memory footprint). Even the default overcommit mode (mode~0, heuristic) allows
+this; mode~1 (\texttt{vm.overcommit\_memory=1}) is starker: \texttt{malloc}
+\emph{always} succeeds regardless of available memory, then the kernel kills
+processes later when it cannot honor the promise. Kubernetes sets mode~1 by
+default.
+
+The error is not surfaced---it is deferred until it is unrecoverable. When the
+OOM killer fires, it logs the kill to the kernel ring buffer and
+continues---no operator acknowledgment, no pause before acting.
+
+UNIX does have tools that push the boundary outward: disk quotas
+(\texttt{EDQUOT}), ulimits (\texttt{SIGXCPU}, \texttt{SIGXFSZ},
+\texttt{EMFILE}), cgroups (scoped OOM, CPU throttling). When configured, these
+behave like the mainframe model---the system says ``no'' and surfaces an error.
+But they are all opt-in. A fresh UNIX system has no disk quotas, generous
+ulimits, no cgroups. Compare z/OS: you cannot submit a job without a region
+size; WLM service classes are mandatory. The compensation boundary in UNIX is a
+configuration choice. In z/OS it is a design invariant---the system will not run
+without it. Under production pressure, opt-in boundaries tend to be the first
+thing relaxed or forgotten.
+
+\subsection{Dynamo-Family Systems: No Boundary at All}
+
+Dynamo-family systems (Cassandra, Riak, early DynamoDB) barely have a
+compensation boundary. Compensating actions are implicit in each subsystem, not
+centrally authored or auditable. Cassandra's \texttt{gc\_grace\_seconds} promotes
+``old'' to ``replicated everywhere'' based on a wall-clock constant. Hinted
+handoff accumulates hints during a node failure and replays them in a burst on
+return. No escalation path exists---when the automatic decision is wrong, the
+system has already acted.
+
+\subsection{The Pattern}
+
+\begin{small}
+\noindent\begin{tabularx}{\textwidth}{@{}lXXXX@{}}
+\toprule
+ & Reports failure & Compensates silently & Escalation model & Structural? \\
+\midrule
+z/OS & Abends, WLM goal misses, console messages & Paging under system-wide pressure
+  & Synchronous---WTO/WTOR waits for operator & Yes---cannot run without region sizes, WLM \\
+UNIX & \texttt{errno} at syscall boundary & VM overcommit, swap, OOM killer
+  & Asynchronous---syslog/dmesg, after the fact & No---quotas/cgroups exist but are opt-in \\
+Dynamo & Logs (if watching) & Everywhere: GC, hinted handoff, read repair
+  & None---no escalation path & No---compensation is the design \\
+\bottomrule
+\end{tabularx}
+\end{small}
+
+As the compensation boundary moves inward, the system's failure modes shift from
+\emph{recoverable} (operator gets a message, decides what to do) to
+\emph{unrecoverable} (data silently lost, wrong process killed, cascade already
+in progress). The key property is not whether a system automates---z/OS automates
+extensively---but whether \emph{wrong} automatic decisions are surfaced before
+their consequences become permanent.
+
+\section{Decision Authority Tracks Information Asymmetry}
+
+The design principle that ties the preceding sections together:
+
+\begin{quote}
+Automatic decisions are safe when the decider has sufficient information to
+guarantee the recovery invariant. When information is insufficient, the system
+must surface state to the entity that \emph{can} distinguish---and wait.
+\end{quote}
+
+\begin{small}
+\noindent\begin{tabularx}{\textwidth}{@{}lXl@{}}
+\toprule
+Decider & Has information about & Can safely decide \\
+\midrule
+TCP & Measured RTT, retry history, bounded retransmission cost
+  & ``Connection is dead'' \\
+Application & Service topology, redundancy, retry policy
+  & ``Retry elsewhere'' \\
+Operator & Physical world, business context, acceptable risk
+  & ``Node is permanently gone'' \\
+\bottomrule
+\end{tabularx}
+\end{small}
+
+Each layer can make decisions within its information boundary. No layer should
+make decisions outside it.\footnote{DHCP lease expiry faces the same structural
+problem---``lease expired'' is not ``address unused''---but largely avoids it
+through protocol design: the client contractually agrees to stop using the
+address at expiry, and Duplicate Address Detection (RFC~5227) catches most
+residual conflicts. The type error exists but the protocol mitigates it
+bilaterally rather than ignoring it. Contrast Cassandra's
+\texttt{gc\_grace\_seconds}, where no such mitigation exists---the wall-clock
+constant is the entire mechanism.}
+
+\section{Applying the Principles: CRDT Tombstone GC}
+
+CRDT tombstone garbage collection is a clean test case for these principles,
+because it forces every question they raise.\footnote{CRDT (Conflict-free
+Replicated Data Type)---a family of data structures that can be replicated across
+multiple nodes, updated independently and concurrently, and merged
+deterministically without coordination. The merge function is mathematically
+guaranteed to converge (it forms a join-semilattice), which eliminates the need
+for consensus on every write---at the cost of carrying metadata, including
+tombstones, that can only be safely discarded when all replicas have observed it.
+See Shapiro et al.~\cite{shapiro2011comprehensive}.}
+
+CRDTs track deletions with tombstones---markers that say ``this key was deleted
+at time~$T$.'' A tombstone can only be GCed when \emph{every} replica has
+observed the deletion, because removing it prematurely from any replica lets the
+pre-delete value reappear (the zombie resurrection problem). ``Every replica has
+observed it'' requires knowing two things: the group membership, and each
+member's progress. The first is a semantic fact about the physical world. The
+second is measurable.
+
+\textbf{The slow-vs-dead problem is inescapable here.} A peer stops
+acknowledging---is it partitioned, overloaded, or decommissioned? This is
+exactly the FLP regime: no amount of observation from inside the system resolves
+it. Any system that GCs tombstones automatically must promote ``unresponsive''
+to ``gone''---an automatic semantic decision with unbounded consequences (silent
+data resurrection if wrong).
+
+\textbf{Cassandra's approach crosses every boundary.}
+\texttt{gc\_grace\_seconds} is a wall-clock constant that assumes repair will
+propagate tombstones within 10~days. This is a semantic decision disguised as a
+configuration parameter, made automatically by the system with insufficient
+information. The recovery action---hinted handoff replay on node return---violates
+the recovery invariant by bursting accumulated writes into an already-stressed
+cluster.
+
+\textbf{What the principles demand instead:}
+
+\begin{enumerate}
+  \item \textbf{Separate what the system can measure from what it cannot.} The
+    system \emph{can} measure: how many tombstones exist, how old they are,
+    which peers have acknowledged which state, and how far behind each peer is.
+    The system \emph{cannot} determine: whether an unresponsive peer will return.
+
+  \item \textbf{Surface the measurable; defer the unmeasurable.} The API exposes
+    what the system knows: \texttt{TombstoneCount()} reports pressure---how
+    urgently GC is needed. \texttt{Status()} reports per-peer replication
+    lag---who is behind and by how much. \texttt{BlockedBy(d)} names the specific
+    peers preventing a given deletion from being GCed---the bottleneck, not just
+    the symptom.
+
+  \item \textbf{Reserve the semantic decision for the entity with sufficient
+    information.} \texttt{Remove\-Peer()} is the only call that declares a node
+    gone. It requires the operator---the one entity that can check whether the
+    hardware is dead, whether the network is partitioned, whether the node is
+    being decommissioned. The system will not make this call on its own.
+
+  \item \textbf{Make the recovery action satisfy the invariant.} If a removed
+    peer returns, it performs a full state transfer rather than delta replay. The
+    returning node bears the cost of reconciliation, and that cost is bounded by
+    the current state size---it does not scale with the duration of absence the
+    way accumulated hints do. The cluster does not experience a burst.
+\end{enumerate}
+
+The result is a compensation boundary drawn where the information boundary
+actually is: the system compensates for things it can measure (replication lag,
+tombstone pressure) and surfaces everything else. No wall-clock constant
+substitutes for operator judgment. No automatic action has unbounded
+consequences.
+
+\section{Design Rules}
+
+\begin{enumerate}
+  \item \textbf{Separate local decisions from semantic decisions.} TCP can kill a
+    connection; only an operator can kill a node.
+
+  \item \textbf{Derive timeouts from measured properties.} If you cannot measure
+    it, you cannot timeout on it safely.
+
+  \item \textbf{Check all three levels of the recovery invariant.} Individual
+    cost bounded (level~1) is necessary but insufficient. Verify that aggregate
+    recovery rate stays within freed capacity (level~2) and that recovery actions
+    avoid amplifying the failure condition (level~3). Level~3 failure is a
+    cascade seed.
+
+  \item \textbf{Surface state, do not hide it.} When you cannot decide safely,
+    expose what you know to whoever can.
+
+  \item \textbf{Make failure a first-class API.} TCP does not hide
+    retransmissions from the application---it surfaces \texttt{ETIMEDOUT}. Your
+    system should not hide peer lag from the operator.
+
+  \item \textbf{Prefer recoverable pessimism over unrecoverable optimism.} A
+    slow operator is recoverable. Silent data loss is not.
+\end{enumerate}
+
+\section{Related Work}
+\label{sec:related-work}
+
+The phenomenon of recovery actions amplifying failures is well-identified across
+multiple communities.
+
+\paragraph{Metastable failures.} Bronson et al.~\cite{bronson2021metastable}
+coined the term and identified the sustaining feedback loop---not the
+trigger---as the root cause. Huang et al.~\cite{huang2022metastable} studied 22
+metastable failures across 11 organizations, finding that ${>}50\%$ involved
+retry storms. Isaacs and Alvaro~\cite{isaacs2025analyzing} propose a modeling
+pipeline for discovering susceptibility at design time. The formal analysis by
+Alvaro et al.~\cite{alvaro2025formal} provides a CTMC-based spectral
+characterization of metastable states. This paper approaches the same phenomenon
+from control theory rather than stochastic processes: the gain matrix asks
+``does the perturbation converge or diverge?'' where CTMCs ask ``how long does
+the system stay trapped?''
+
+\paragraph{Resilience engineering.} David Woods' concept of
+\emph{decompensation}---the exhaustion of adaptive capacity when recovery
+mechanisms become the dominant source of
+load~\cite{woods2015four,woods2018theory}---captures the qualitative phenomenon
+that level~3 of the recovery invariant formalizes quantitatively. Woods asks
+whether the system can extend capacity at all (\emph{graceful extensibility});
+the compensation boundary asks \emph{where} the system draws the line between
+reporting and acting.
+
+\paragraph{Control theory for computing.} Hellerstein et
+al.~\cite{hellerstein2004feedback} applied control theory (MIMO, transfer
+functions, gain, pole placement) to computing systems. Their focus is on
+designing controllers (admission control, scheduling), not on analyzing when
+existing recovery mechanisms cascade. The gain matrix formalization in this paper
+uses the same mathematical tradition for a different question.
+
+\paragraph{Cascading failures in other domains.} Ramirez, Odijk, and
+Bauso~\cite{ramirez2023cascading} applied gain matrix and Lyapunov stability
+analysis to cascading failures in financial networks. The spectral radius
+stability condition $\rho(G) < 1$ is the same; the domain and the specific
+construction of $G$ differ.
+
+\paragraph{Failure detectors.} Chandra and Toueg~\cite{chandra1996unreliable}
+formalized the properties (completeness, accuracy) that failure detectors need to
+enable consensus, establishing the theoretical foundation for the layered
+decision authority model.
+
+\paragraph{Exponential backoff stability.} The formal stability of binary
+exponential backoff is well-studied. This paper uses TCP as a pedagogical
+reference design---an existence proof that safe automatic recovery is
+achievable---rather than making new claims about TCP itself.
+
+\appendix
+
+\section{The Gain Matrix: Formalizing the Feedback Bound}
+\label{sec:gain-matrix}
+
+Define the $n \times n$ recovery gain matrix $\mathbf{G}$:
+\begin{equation}
+  G_{ij} = \frac{\partial r_i}{\partial (-h_j)}
+\end{equation}
+
+Entry $G_{ij}$ measures how much additional recovery bandwidth appears on
+resource $i$ when headroom on resource $j$ decreases by one unit. For systems
+without backoff, $G_{ij} \geq 0$: less headroom means equal or greater recovery
+demand.
+
+When headroom drops by $|\Delta\mathbf{h}|$, recovery demand increases by
+$\mathbf{G} \cdot |\Delta\mathbf{h}|$, reducing headroom further:
+\begin{equation}
+  |\Delta\mathbf{h}| \to \mathbf{G} \cdot |\Delta\mathbf{h}|
+  \to \mathbf{G}^2 \cdot |\Delta\mathbf{h}| \to \cdots
+\end{equation}
+\begin{equation}
+  \text{Total: } (\mathbf{I} + \mathbf{G} + \mathbf{G}^2 + \cdots)
+  \cdot |\Delta\mathbf{h}|
+  = (\mathbf{I} - \mathbf{G})^{-1} \cdot |\Delta\mathbf{h}|
+\end{equation}
+
+This geometric series converges if and only if $\rho(\mathbf{G}) < 1$, where
+$\rho(\mathbf{G})$ is the spectral radius of $\mathbf{G}$ (the largest absolute
+value among its eigenvalues).
+
+\begin{quote}
+\textbf{Stability condition:} $\rho(\mathbf{G}) < 1$.
+\end{quote}
+
+For a single resource, $\mathbf{G}$ is scalar and the condition reduces to
+$G < 1$. For multiple resources, the spectral radius captures cross-resource
+feedback: even if each diagonal entry $G_{ii} < 1$, the system cascades when
+off-diagonal entries are large enough---$G_{12} \cdot G_{21} \geq 1$ means
+resource~1's recovery stresses resource~2, whose recovery stresses resource~1.
+
+\subsection{Monotonicity of the Stability Boundary}
+
+For systems with $\mathbf{G} \geq 0$, the stability boundary is monotone in
+load. This follows from a classical result.
+
+\begin{theorem}[Perron-Frobenius, non-negative case]
+Let $A \in \mathbb{R}^{n \times n}$ with $a_{ij} \geq 0$ for all $i, j$. Then:
+\begin{enumerate}
+  \item $\rho(A)$ is an eigenvalue of $A$.
+  \item There exists $x \geq 0$, $x \neq 0$, with $Ax = \rho(A)x$.
+  \item If $B \geq A$ entrywise ($b_{ij} \geq a_{ij}$ for all $i, j$), then
+    $\rho(B) \geq \rho(A)$.
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}[Proof of property 3]
+The Collatz-Wielandt characterization gives
+$\rho(A) = \max_{x > 0} \min_i (Ax)_i / x_i$. If $B \geq A$ entrywise, then
+$(Bx)_i \geq (Ax)_i$ for every $x > 0$; the inner minimum can only increase,
+so the outer maximum can only increase.
+\end{proof}
+
+\paragraph{Consequence.} If load increase causes any $G_{ij}$ to grow,
+$\rho(\mathbf{G})$ grows. There exists a critical headroom $\mathbf{h}^*$ where
+$\rho(\mathbf{G}(\mathbf{h}^*)) = 1$:
+
+\begin{itemize}
+  \item $\mathbf{h}(t) > \mathbf{h}^*$: $\rho(\mathbf{G}) < 1$ $\to$ stable
+  \item $\mathbf{h}(t) < \mathbf{h}^*$: $\rho(\mathbf{G}) > 1$ $\to$ cascade
+\end{itemize}
+
+The transition is one-directional. The system cannot self-rescue by becoming more
+overloaded.
+
+\section{Computing $h^*$: UNIX Swap Thrashing}
+\label{sec:swap}
+
+Swap crosses resource domains---it trades memory capacity (stock) for disk
+bandwidth (flow)---making it a clean test of the multi-resource framework.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbol & Meaning & Unit \\
+\midrule
+$S$ & Physical memory & pages \\
+$W$ & Total working set (all processes) & pages \\
+$E = W - S$ & Excess (pages that must swap) & pages \\
+$f$ & Distinct page access rate (all processes) & pages/sec \\
+$D'$ & Spare disk IOPS (total minus normal workload) & IOPS \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Under uniform access, the probability of hitting a swapped-out page is $E/W$.
+Each fault costs 2~IOPS (swap-in read + swap-out write):
+\begin{equation}
+  P = \frac{2fE}{W}
+\end{equation}
+
+Setting $P = D'$ (disk saturation) and solving for the critical excess:
+\begin{equation}
+  E^* = \frac{D' W}{2f}
+\end{equation}
+
+For $W \approx S$, the swap margin ratio---excess as a fraction of physical
+memory:
+\begin{equation}
+  \frac{E^*}{S} = \frac{D'}{2f}
+\end{equation}
+
+Computed for a 64\,GB server ($S = 16\text{M}$ pages at 4\,KB/page):
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Workload & $f$ (pages/sec) & HDD ($D' = 100$) & NVMe ($D' = 50{,}000$) \\
+\midrule
+Light web (1K req/s) & 10,000 & 320\,MB (0.5\%) & no $h^*$\dag \\
+Database (1K qps) & 100,000 & 32\,MB (0.05\%) & 16\,GB (25\%) \\
+Analytics scan & 1,000,000 & 3.2\,MB (0.005\%) & 1.6\,GB (2.5\%) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\dag\ $E^*/S > 1$: disk bandwidth exceeds maximum possible fault rate. The
+binding constraint shifts to latency (${\sim}100$\,\textmu s per NVMe fault),
+which the bandwidth model does not capture.
+
+On a database server with HDD, the system thrashes at 32\,MB of excess working
+set---0.05\% over physical memory. On NVMe, 16\,GB. The 500$\times$ IOPS
+improvement buys a proportional increase in margin, but the margin is finite and
+unmonitored.
+
+\paragraph{Gain matrix at $h^*$.} At disk saturation, the feedback loop:
+\begin{equation}
+  \mathbf{G} = \begin{pmatrix} \varepsilon & \beta \\ \alpha & \varepsilon
+  \end{pmatrix}
+  \quad\text{(rows: disk, memory)}
+\end{equation}
+
+\begin{itemize}[nosep]
+  \item $\alpha = \partial(\text{swap IOPS}) / \partial(-h_{\mathrm{mem}})
+    \approx 2f/W$: each page of excess generates $2f/W$ IOPS
+  \item $\beta = \partial(\text{mem demand}) / \partial(-h_{\mathrm{disk}})$:
+    disk saturation blocks processes, which hold pages plus ${\sim}8$--16\,KB of
+    kernel I/O buffers per pending operation
+\end{itemize}
+
+Eigenvalues: $\varepsilon \pm \sqrt{\alpha\beta}$. Cascade when
+$\alpha\beta \geq 1$---the cross-resource loop (memory pressure $\to$ swap $\to$
+disk saturation $\to$ blocked processes $\to$ memory pressure) has compound gain
+$\geq 1$.
+
+\section{Computing $h^*$: TCP (The Degenerate Case)}
+\label{sec:tcp-hstar}
+
+TCP is the degenerate case: single resource (link bandwidth), scalar gain.
+
+After $k$ consecutive timeouts, RTO doubles: $\mathrm{RTO}_k = \mathrm{RTO}_{\mathrm{base}} \times 2^k$.
+Retransmission rate:
+\begin{equation}
+  r_k = \frac{1}{\mathrm{RTO}_{\mathrm{base}} \times 2^k}
+\end{equation}
+
+When congestion increases ($h$ decreases, another round of losses), $k$
+increments:
+\begin{equation}
+  r_{k+1} = r_k / 2
+\end{equation}
+
+$G_{\mathrm{TCP}} = -0.5$. Each unit of congestion halves recovery demand.
+
+Perron-Frobenius does not apply---$G$ has a negative entry.
+$\rho(|G|) = 0.5 < 1$ at all loads. No $h^*$ exists. TCP is unconditionally
+stable, not because recovery is bounded, but because it is a
+\textbf{contraction}: recovery reduces the condition that triggered it.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & $G \geq 0$ (no backoff) & $G < 0$ (backoff) \\
+\midrule
+$\rho(G)$ monotone in load & Non-decreasing & Can decrease \\
+$h^*$ exists & Always & May not \\
+Self-rescue under overload & Impossible & Possible \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Note on Nonlinearity}
+\label{sec:nonlinearity}
+
+The gain matrix $\mathbf{G}$ is the Jacobian of the recovery dynamics at the
+current operating point---a local linearization. Three results bound the gap
+between the linear model and the nonlinear system.
+
+\paragraph{Local validity.} The Hartman-Grobman
+theorem~\cite{hartman1960lemma,grobman1959homeomorphisms} guarantees that the
+nonlinear system's local phase portrait is topologically equivalent to the
+linearization when no eigenvalue of $\mathbf{G}$ lies on the unit circle.
+$\rho(\mathbf{G}) < 1$ implies local asymptotic stability;
+$\rho(\mathbf{G}) > 1$ implies local instability.
+
+\paragraph{Monotonicity.} For $\mathbf{G} \geq 0$, $\rho(\mathbf{G})$ is
+non-decreasing in every entry (Perron-Frobenius property~3). If recovery becomes
+relatively more expensive as headroom shrinks---true for every system in this
+paper except TCP---then $\rho(\mathbf{G})$ is non-decreasing in load. The
+boundary $\mathbf{h}^*$ is a clean phase transition: stable on one side, cascade
+on the other. The nonlinear system may reach instability sooner than the
+linearization predicts, but it cannot reach stability later. The linear analysis
+is a lower bound on stability---the safe direction for engineering.
+
+\paragraph{Quantitative margins.} For exact convergence rates, overshoot, or
+dynamics near $\rho(\mathbf{G}) = 1$, Lyapunov stability analysis provides the
+general framework: construct $V(x)$ decreasing along trajectories; existence
+proves stability, rate of decrease bounds
+convergence~\cite{hirsch1985systems,smith1995monotone}. For the monotone case,
+the theory of cooperative dynamical systems gives stronger structure: trajectories
+are ordered, limit sets are equilibria, and the worst-case trajectory is
+computable by evaluating $\mathbf{G}$ at its maximum entries.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\bigskip
+\noindent\textit{Thanks for reading. If you work on distributed systems and have
+seen the recovery invariant violated in ways not covered here, or if you spot
+errors in the formalization, I'd like to hear about it.}
+
+\end{document}

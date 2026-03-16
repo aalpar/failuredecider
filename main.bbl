@@ -1,0 +1,97 @@
+\begin{thebibliography}{10}
+
+\bibitem{alvaro2025formal}
+Peter Alvaro, Rebecca Isaacs, Rupak Majumdar, Kiran-Kumar Muniswamy-Reddy,
+  Mahmoud Salamati, and Sadegh Soudjani.
+\newblock Formal analysis of metastable failures in software systems.
+\newblock {\em arXiv preprint arXiv:2510.03551}, 2025.
+
+\bibitem{bronson2021metastable}
+Nathan Bronson, Abutalib Aghayev, Aleksey Charapko, and Timothy Zhu.
+\newblock Metastable failures in distributed systems.
+\newblock In {\em HotOS~'21: Workshop on Hot Topics in Operating Systems},
+  2021.
+
+\bibitem{chandra1996unreliable}
+Tushar~Deepak Chandra and Sam Toueg.
+\newblock Unreliable failure detectors for reliable distributed systems.
+\newblock {\em Journal of the ACM}, 43(2):225--267, 1996.
+
+\bibitem{fischer1985impossibility}
+Michael~J. Fischer, Nancy~A. Lynch, and Michael~S. Paterson.
+\newblock Impossibility of distributed consensus with one faulty process.
+\newblock {\em Journal of the ACM}, 32(2):374--382, 1985.
+
+\bibitem{gray1993transaction}
+Jim Gray and Andreas Reuter.
+\newblock {\em Transaction Processing: Concepts and Techniques}.
+\newblock Morgan Kaufmann, San Mateo, CA, 1993.
+
+\bibitem{grobman1959homeomorphisms}
+D.~M. Grobman.
+\newblock Homeomorphisms of systems of differential equations.
+\newblock {\em Doklady Akademii Nauk SSSR}, 128:880--881, 1959.
+
+\bibitem{hartman1960lemma}
+Philip Hartman.
+\newblock A lemma in the theory of structural stability of differential
+  equations.
+\newblock {\em Proceedings of the American Mathematical Society}, 11:610--620,
+  1960.
+
+\bibitem{hellerstein2004feedback}
+Joseph~L. Hellerstein, Yixin Diao, Sujay Parekh, and Dawn~M. Tilbury.
+\newblock {\em Feedback Control of Computing Systems}.
+\newblock Wiley, Hoboken, NJ, 2004.
+
+\bibitem{hirsch1985systems}
+Morris~W. Hirsch.
+\newblock Systems of differential equations that are competitive or cooperative
+  {II}: Convergence almost everywhere.
+\newblock {\em SIAM Journal on Mathematical Analysis}, 16(3):423--439, 1985.
+
+\bibitem{huang2022metastable}
+Lexiang Huang, Matthew Magnaye, Anand Shenoy, Jialun Hu, Aleksey Charapko,
+  Abutalib Aghayev, and Timothy Zhu.
+\newblock Metastable failures in the wild.
+\newblock In {\em OSDI~'22: 16th USENIX Symposium on Operating Systems Design
+  and Implementation}. USENIX, 2022.
+
+\bibitem{isaacs2025analyzing}
+Rebecca Isaacs, Peter Alvaro, Rupak Majumdar, Kiran Reddy, Mahmoud Salamati,
+  and Sadegh Soudjani.
+\newblock Analyzing metastable failures.
+\newblock In {\em HotOS~'25: Workshop on Hot Topics in Operating Systems},
+  pages 172--178, 2025.
+
+\bibitem{ramirez2023cascading}
+Stefanny Ramirez, Maaike Odijk, and Dario Bauso.
+\newblock Cascading failures: Dynamics, stability and control.
+\newblock {\em arXiv preprint arXiv:2305.00838}, 2023.
+
+\bibitem{shapiro2011comprehensive}
+Marc Shapiro, Nuno Pregui\c{c}a, Carlos Baquero, and Marek Zawirski.
+\newblock A comprehensive study of convergent and commutative replicated data
+  types.
+\newblock Technical Report RR-7506, INRIA, 2011.
+
+\bibitem{smith1995monotone}
+Hal~L. Smith.
+\newblock {\em Monotone Dynamical Systems: An Introduction to the Theory of
+  Competitive and Cooperative Systems}.
+\newblock Number~41 in Mathematical Surveys and Monographs. American
+  Mathematical Society, Providence, RI, 1995.
+
+\bibitem{woods2015four}
+David~D. Woods.
+\newblock Four concepts for resilience and the implications for the future of
+  resilience engineering.
+\newblock {\em Reliability Engineering and System Safety}, 141:5--9, 2015.
+
+\bibitem{woods2018theory}
+David~D. Woods.
+\newblock The theory of graceful extensibility: Basic rules that govern
+  adaptive systems.
+\newblock {\em Environment Systems and Decisions}, 38:433--457, 2018.
+
+\end{thebibliography}
