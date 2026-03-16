@@ -207,8 +207,9 @@ correctness depends on no layer exceeding its boundary.
 
 TCP's design is not just good engineering intuition---it satisfies a precise
 invariant that separates safe automatic recovery from cascading failure. The
-invariant has three levels. Each is necessary; only all three together are
-sufficient.
+invariant has three levels. Each is necessary. Together they guarantee bounded
+recovery in the linearized model developed in \cref{sec:gain-matrix};
+\cref{sec:nonlinearity} bounds the gap to the nonlinear system.
 
 \subsection{Precondition: You Need a Resource Model}
 
@@ -326,9 +327,9 @@ cascade---the danger is in their aggregate behavior.
 \subsection{Level 2: Aggregate Bound}
 
 \begin{quote}
-At any point in time, the rate of resource consumption by all concurrent
-recovery actions must remain below the rate of resource freed by the failures
-they compensate for.
+At any point in time, the aggregate resource consumption by all concurrent
+recovery actions must remain within the headroom not consumed by normal
+operations: $h_i(t) = C_i - w_i(t) - r_i(t) \geq 0$ for every resource~$i$.
 \end{quote}
 
 This is the burst dimension. The distinction between ``amortized OK'' and
@@ -342,7 +343,7 @@ normal load regardless of failure count.
 
 Cassandra's hinted handoff violates this: hints accumulate linearly during a
 node's absence and replay in a burst on return. A 10-minute outage at 100~Mbps
-per node produces ${\sim}7$~GiB of hints; at the default 1024~kbps throttle,
+per node produces ${\sim}7$~GiB of hints; at the default 1024~KB/s throttle,
 replay takes ${\sim}2$~hours. If the throttle is raised (as operators under
 pressure often do), the burst can recreate the overload that caused the original
 failure.
@@ -811,16 +812,16 @@ resource $i$ when headroom on resource $j$ decreases by one unit. For systems
 without backoff, $G_{ij} \geq 0$: less headroom means equal or greater recovery
 demand.
 
-When headroom drops by $|\Delta\mathbf{h}|$, recovery demand increases by
-$\mathbf{G} \cdot |\Delta\mathbf{h}|$, reducing headroom further:
+When headroom drops by $\Delta\mathbf{h}$, recovery demand increases by
+$\mathbf{G} \cdot \Delta\mathbf{h}$, reducing headroom further:
 \begin{equation}
-  |\Delta\mathbf{h}| \to \mathbf{G} \cdot |\Delta\mathbf{h}|
-  \to \mathbf{G}^2 \cdot |\Delta\mathbf{h}| \to \cdots
+  \Delta\mathbf{h} \to \mathbf{G} \cdot \Delta\mathbf{h}
+  \to \mathbf{G}^2 \cdot \Delta\mathbf{h} \to \cdots
 \end{equation}
 \begin{equation}
   \text{Total: } (\mathbf{I} + \mathbf{G} + \mathbf{G}^2 + \cdots)
-  \cdot |\Delta\mathbf{h}|
-  = (\mathbf{I} - \mathbf{G})^{-1} \cdot |\Delta\mathbf{h}|
+  \cdot \Delta\mathbf{h}
+  = (\mathbf{I} - \mathbf{G})^{-1} \cdot \Delta\mathbf{h}
 \end{equation}
 
 This geometric series converges if and only if $\rho(\mathbf{G}) < 1$, where
@@ -860,7 +861,10 @@ so the outer maximum can only increase.
 \end{proof}
 
 \paragraph{Consequence.} If load increase causes any $G_{ij}$ to grow,
-$\rho(\mathbf{G})$ grows. There exists a critical headroom $\mathbf{h}^*$ where
+$\rho(\mathbf{G})$ grows. For systems where $\mathbf{G}(\mathbf{h})$ is
+continuous and recovery cost grows without bound as headroom vanishes---true for
+every system in this paper except TCP---the intermediate value theorem gives a
+critical headroom $\mathbf{h}^*$ where
 $\rho(\mathbf{G}(\mathbf{h}^*)) = 1$:
 
 \begin{itemize}
@@ -933,7 +937,7 @@ unmonitored.
 
 \paragraph{Gain matrix at $h^*$.} At disk saturation, the feedback loop:
 \begin{equation}
-  \mathbf{G} = \begin{pmatrix} \varepsilon & \beta \\ \alpha & \varepsilon
+  \mathbf{G} = \begin{pmatrix} \varepsilon & \alpha \\ \beta & \varepsilon
   \end{pmatrix}
   \quad\text{(rows: disk, memory)}
 \end{equation}
@@ -947,9 +951,9 @@ unmonitored.
 \end{itemize}
 
 Eigenvalues: $\varepsilon \pm \sqrt{\alpha\beta}$. Cascade when
-$\alpha\beta \geq 1$---the cross-resource loop (memory pressure $\to$ swap $\to$
-disk saturation $\to$ blocked processes $\to$ memory pressure) has compound gain
-$\geq 1$.
+$\alpha\beta \geq (1 - \varepsilon)^2$---the cross-resource loop (memory pressure
+$\to$ swap $\to$ disk saturation $\to$ blocked processes $\to$ memory pressure)
+has compound gain $\geq 1$.
 
 \section{Computing $h^*$: TCP (The Degenerate Case)}
 \label{sec:tcp-hstar}

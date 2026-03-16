@@ -6,7 +6,7 @@ function G = compute_gain_matrix(params)
 %
 %   Types:
 %     'tcp'       - scalar G = -0.5 (exponential backoff halves rate)
-%     'swap'      - 2x2 cross-resource [epsilon, beta; alpha, epsilon]
+%     'swap'      - 2x2 cross-resource [epsilon, alpha; beta, epsilon] (rows: disk, memory)
 %     'cassandra' - 2x2 disk/CPU feedback during hint replay
 %     'oom'       - scalar G = alloc_on_restart / mem_freed
 
@@ -18,7 +18,7 @@ function G = compute_gain_matrix(params)
             G = -0.5;
 
         case 'swap'
-            % G = [epsilon, beta; alpha, epsilon]
+            % G = [epsilon, alpha; beta, epsilon]  (rows: disk, memory)
             % alpha = d(swap_IOPS)/d(-h_mem) = 2f/W
             % beta  = d(mem_demand)/d(-h_disk) = buf_per_blocked * block_rate
             % alpha: how much disk IOPS increase per page of memory pressure. Derived from: 2 IOPS per page fault, fault_prob ~ E/W
@@ -26,7 +26,7 @@ function G = compute_gain_matrix(params)
             % beta: how much memory demand increases per unit of disk saturation (blocked processes hold I/O buffers)
             beta  = params.buf_per_blocked * params.block_rate_per_iops;
             eps_  = params.epsilon;  % self-feedback (small)
-            G = [eps_, beta; alpha, eps_];
+            G = [eps_, alpha; beta, eps_];
 
         case 'cassandra'
             % During hint replay:

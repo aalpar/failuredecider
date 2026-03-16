@@ -2,7 +2,7 @@ function results = derive_swap_hstar()
 % DERIVE_SWAP_HSTAR Symbolic derivation of swap thrashing stability boundary.
 %
 %   Derives:
-%     1. Eigenvalues of G = [eps, beta; alpha, eps]
+%     1. Eigenvalues of G = [eps, alpha; beta, eps]  (rows: disk, memory)
 %     2. Spectral radius rho(G) = eps + sqrt(alpha*beta)
 %     3. Cascade condition: alpha*beta >= (1-eps)^2
 %     4. Critical excess: E* = D'*W/(2f)
@@ -17,11 +17,11 @@ function results = derive_swap_hstar()
 
     %% 1. Eigenvalues
     % Symbolic matrix — eig() will compute eigenvalues as symbolic expressions, not numbers.
-    G = [eps_, beta_; alpha_, eps_];
+    G = [eps_, alpha_; beta_, eps_];
     % eig() on a symbolic matrix returns eigenvalues as symbolic expressions (exact, not floating-point).
     eigenvalues = eig(G);
     eigenvalues = simplify(eigenvalues);
-    fprintf('1. G = [eps, beta; alpha, eps]\n');
+    fprintf('1. G = [eps, alpha; beta, eps]  (rows: disk, memory)\n');
     fprintf('   Eigenvalues: %s, %s\n', char(eigenvalues(1)), char(eigenvalues(2)));
     results.eigenvalues = eigenvalues;
 
