@@ -341,7 +341,7 @@ This is the burst dimension. The distinction between ``amortized OK'' and
 TCP satisfies this: exponential backoff ensures the \emph{rate} of
 retransmissions decreases with each round, so aggregate retry bandwidth shrinks
 over time. Google's SRE retry budget is an explicit level-2 mechanism---capping
-retries at 10\% of total requests bounds the aggregate cost to 1.1$\times$
+retries at 10\% of requests bounds the aggregate cost to 1.1$\times$
 normal load regardless of failure count.
 
 Cassandra's hinted handoff violates this: hints accumulate linearly during a
@@ -435,7 +435,7 @@ Level & Condition & TCP & Hinted handoff & OOM killer \\
 2 & Aggregate: recovery rate $\leq$ freed capacity
   & \checkmark\ exponential backoff
   & $\times$\ burst on return
-  & \checkmark$^\dagger$\ single kill \\
+  & per-event only \\
 3 & Feedback: recovery gain $< 1$
   & \checkmark\ backoff reduces congestion
   & $\times$\ replay triggers read repair cascade
@@ -443,10 +443,6 @@ Level & Condition & TCP & Hinted handoff & OOM killer \\
 \bottomrule
 \end{tabularx}
 \end{small}
-
-\noindent$^\dagger$Per-event only. Under sustained pressure the OOM killer fires
-repeatedly (kill $\to$ restart $\to$ kill); the feedback loop that makes this
-aggregate behavior dangerous is captured by level~3.
 
 The recovery invariant tells you whether recovery \emph{is} safe. It does not
 tell you whether it will \emph{stay} safe, or what to do when it is not. A
@@ -819,8 +815,10 @@ resource $i$ when headroom on resource $j$ decreases by one unit. For systems
 without backoff, $G_{ij} \geq 0$: less headroom means equal or greater recovery
 demand.
 
-When headroom drops by $\Delta\mathbf{h}$, recovery demand increases by
-$\mathbf{G} \cdot \Delta\mathbf{h}$, reducing headroom further:
+When headroom drops by $\Delta\mathbf{h}$, recovery demand changes by
+$\mathbf{G} \cdot \Delta\mathbf{h}$. For $\mathbf{G} \geq 0$ this is an
+increase (amplifying); for entries $G_{ij} < 0$ (e.g., backoff) it is a
+decrease (stabilizing). In either case the iteration proceeds:
 \begin{equation}
   \Delta\mathbf{h} \to \mathbf{G} \cdot \Delta\mathbf{h}
   \to \mathbf{G}^2 \cdot \Delta\mathbf{h} \to \cdots
@@ -903,6 +901,9 @@ $D'$ & Spare disk IOPS (total minus normal workload) & IOPS \\
 \end{center}
 
 Under uniform access, the probability of hitting a swapped-out page is $E/W$.
+(Real workloads have locality, so the true fault probability is lower for a
+given $E/W$; the uniform assumption yields a conservative---i.e.,
+smaller---margin $E^*$.)
 Each fault costs 2~IOPS (swap-in read + swap-out write):
 \begin{equation}
   P = \frac{2fE}{W}
@@ -950,11 +951,17 @@ unmonitored.
 \end{equation}
 
 \begin{itemize}[nosep]
+  \item $\varepsilon$: self-coupling---each resource's recovery load feeding back
+    on itself (I/O scheduler overhead, kernel swap bookkeeping). Small relative
+    to the cross-resource terms; set equal for both resources as a simplification
   \item $\alpha = \partial(\text{swap IOPS}) / \partial(-h_{\mathrm{mem}})
     \approx 2f/W$: each page of excess generates $2f/W$ IOPS
   \item $\beta = \partial(\text{mem demand}) / \partial(-h_{\mathrm{disk}})$:
     disk saturation blocks processes, which hold pages plus ${\sim}8$--16\,KB of
-    kernel I/O buffers per pending operation
+    kernel I/O buffers per pending operation. Unlike $\alpha$, $\beta$ has no
+    clean closed form---it depends on I/O scheduler behavior, process blocking
+    semantics, and kernel buffer allocation. It is measurable empirically but
+    not derivable from the parameters in this model
 \end{itemize}
 
 Eigenvalues: $\varepsilon \pm \sqrt{\alpha\beta}$. Cascade when
@@ -966,6 +973,9 @@ has compound gain $\geq 1$.
 \label{sec:tcp-hstar}
 
 TCP is the degenerate case: single resource (link bandwidth), scalar gain.
+The gain matrix is defined as a Jacobian (continuous), but TCP's backoff is a
+discrete iteration---each timeout event doubles the RTO. The ``gain'' here is
+the contraction ratio of that discrete map.
 
 After $k$ consecutive timeouts, RTO doubles: $\mathrm{RTO}_k = \mathrm{RTO}_{\mathrm{base}} \times 2^k$.
 Retransmission rate:
@@ -1005,10 +1015,11 @@ The gain matrix $\mathbf{G}$ is the Jacobian of the recovery dynamics at the
 current operating point---a local linearization. Three results bound the gap
 between the linear model and the nonlinear system.
 
-\paragraph{Local validity.} The Hartman-Grobman
-theorem~\cite{hartman1960lemma,grobman1959homeomorphisms} guarantees that the
-nonlinear system's local phase portrait is topologically equivalent to the
-linearization when no eigenvalue of $\mathbf{G}$ lies on the unit circle.
+\paragraph{Local validity.} The discrete Hartman-Grobman
+theorem~\cite{hartman1960lemma,grobman1959homeomorphisms,hartman1960local}
+guarantees that the nonlinear system's local phase portrait is topologically
+equivalent to the linearization when no eigenvalue of $\mathbf{G}$ lies on the
+unit circle.
 $\rho(\mathbf{G}) < 1$ implies local asymptotic stability;
 $\rho(\mathbf{G}) > 1$ implies local instability.
 
