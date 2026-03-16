@@ -1,0 +1,24 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
+
+# Simulink autosave
+*.slx.autosave
+slprj/
+
+# MATLAB generated
+*.mexa64
+*.mexmaci64
+*.mexw64
