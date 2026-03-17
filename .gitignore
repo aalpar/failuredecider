@@ -31,3 +31,6 @@ slprj/
 
 # Simulink cache
 *.slxc
+
+# Misc Files
+*.txt
