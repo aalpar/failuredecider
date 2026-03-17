@@ -17,4 +17,4 @@ MATLAB/Simulink models that formalize and verify the paper's claims. Run `run_al
 
 ## License
 
-Paper: [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/)
+Paper: [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)
