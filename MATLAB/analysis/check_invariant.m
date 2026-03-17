@@ -75,11 +75,19 @@ function result = check_invariant(sys)
     else
         G_eval = sys.G;
     end
-    % Spectral radius = largest absolute eigenvalue. eig() computes eigenvalues. If rho < 1, perturbations decay (stable). If rho >= 1, perturbations amplify (cascade).
-    result.rho = max(abs(eig(G_eval)));
+    % [V, D] = eig(G) returns eigenvectors as columns of V and eigenvalues on the diagonal of D.
+    % The column V(:,k) is the eigenvector for eigenvalue D(k,k).
+    [V, D] = eig(G_eval);
+    eigenvalues = diag(D);
+    % Spectral radius = largest absolute eigenvalue. If rho < 1, perturbations decay (stable). If rho >= 1, perturbations amplify (cascade).
+    [result.rho, dom_idx] = max(abs(eigenvalues));
     result.level3 = result.rho < 1;
     result.details.level3_G = G_eval;
-    result.details.level3_eigenvalues = eig(G_eval);
+    result.details.level3_eigenvalues = eigenvalues;
+    % Dominant eigenvector: the cascade shape — relative resource contribution to the dangerous mode.
+    % Normalized to unit sum so entries read as proportions (e.g. [0.73, 0.27] = "73% disk, 27% memory").
+    dom_evec = abs(V(:, dom_idx));
+    result.details.level3_dominant_eigenvector = dom_evec / sum(dom_evec);
 
     %% Level 2: Aggregate bound — simulate and check h(t) >= 0
     % Simulate the system forward in time to check if headroom h(t) stays non-negative
