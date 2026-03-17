@@ -208,7 +208,8 @@ correctness depends on no layer exceeding its boundary.
 TCP's design is not just good engineering intuition---it satisfies a precise
 invariant that separates safe automatic recovery from cascading failure. The
 invariant has three levels. Each is necessary. Together they guarantee bounded
-recovery in the linearized model developed in \cref{sec:gain-matrix};
+recovery when the system's dynamics near the operating point are modeled as a
+first-order linearized system (\cref{sec:gain-matrix});
 \cref{sec:nonlinearity} bounds the gap to the nonlinear system.
 
 \subsection{Precondition: You Need a Resource Model}
@@ -805,6 +806,10 @@ achievable---rather than making new claims about TCP itself.
 \section{The Gain Matrix: Formalizing the Feedback Bound}
 \label{sec:gain-matrix}
 
+We model recovery dynamics near the operating point as a first-order linearized
+system. The state is the headroom vector $\mathbf{h}(t)$, and the feedback
+structure is captured by the recovery gain matrix.
+
 Define the $n \times n$ recovery gain matrix $\mathbf{G}$:
 \begin{equation}
   G_{ij} = \frac{\partial r_i}{\partial (-h_j)}
@@ -845,32 +850,16 @@ resource~1's recovery stresses resource~2, whose recovery stresses resource~1.
 
 \subsection{Monotonicity of the Stability Boundary}
 
-For systems with $\mathbf{G} \geq 0$, the stability boundary is monotone in
-load. This follows from a classical result.
-
-\begin{theorem}[Perron-Frobenius, non-negative case]
-Let $A \in \mathbb{R}^{n \times n}$ with $a_{ij} \geq 0$ for all $i, j$. Then:
-\begin{enumerate}
-  \item $\rho(A)$ is an eigenvalue of $A$.
-  \item There exists $x \geq 0$, $x \neq 0$, with $Ax = \rho(A)x$.
-  \item If $B \geq A$ entrywise ($b_{ij} \geq a_{ij}$ for all $i, j$), then
-    $\rho(B) \geq \rho(A)$.
-\end{enumerate}
-\end{theorem}
-
-\begin{proof}[Proof of property 3]
-The Collatz-Wielandt characterization gives
-$\rho(A) = \max_{x > 0} \min_i (Ax)_i / x_i$. If $B \geq A$ entrywise, then
-$(Bx)_i \geq (Ax)_i$ for every $x > 0$; the inner minimum can only increase,
-so the outer maximum can only increase.
-\end{proof}
-
-\paragraph{Consequence.} If load increase causes any $G_{ij}$ to grow,
-$\rho(\mathbf{G})$ grows. For systems where $\mathbf{G}(\mathbf{h})$ is
-continuous and recovery cost grows without bound as headroom vanishes---true for
-every system in this paper except TCP---the intermediate value theorem gives a
-critical headroom $\mathbf{h}^*$ where
-$\rho(\mathbf{G}(\mathbf{h}^*)) = 1$:
+For systems with $\mathbf{G} \geq 0$, the spectral radius is non-decreasing in
+every entry of $\mathbf{G}$.\footnote{This follows from the Perron-Frobenius
+theorem for non-negative matrices: if $B \geq A$ entrywise, then
+$\rho(B) \geq \rho(A)$. The Collatz-Wielandt characterization
+$\rho(A) = \max_{x > 0} \min_i (Ax)_i / x_i$ makes the monotonicity immediate.}
+If load increase causes any $G_{ij}$ to grow, $\rho(\mathbf{G})$ grows. For
+systems where $\mathbf{G}(\mathbf{h})$ is continuous and recovery cost grows
+without bound as headroom vanishes---true for every system in this paper except
+TCP---the intermediate value theorem gives a critical headroom $\mathbf{h}^*$
+where $\rho(\mathbf{G}(\mathbf{h}^*)) = 1$:
 
 \begin{itemize}
   \item $\mathbf{h}(t) > \mathbf{h}^*$: $\rho(\mathbf{G}) < 1$ $\to$ stable
@@ -991,7 +980,7 @@ increments:
 
 $G_{\mathrm{TCP}} = -0.5$. Each unit of congestion halves recovery demand.
 
-Perron-Frobenius does not apply---$G$ has a negative entry.
+The monotonicity result does not apply---$G$ has a negative entry.
 $\rho(|G|) = 0.5 < 1$ at all loads. No $h^*$ exists. TCP is unconditionally
 stable, not because recovery is bounded, but because it is a
 \textbf{contraction}: recovery reduces the condition that triggered it.
@@ -1012,40 +1001,31 @@ Self-rescue under overload & Impossible & Possible \\
 \label{sec:nonlinearity}
 
 The gain matrix $\mathbf{G}$ is the Jacobian of the recovery dynamics at the
-current operating point---a local linearization. Three results bound the gap
-between the linear model and the nonlinear system.
+current operating point---a local linearization. The nonlinear system's behavior
+near this point is governed by two results.
 
-\paragraph{Local validity.} The discrete Hartman-Grobman
-theorem~\cite{hartman1960lemma,grobman1959homeomorphisms,hartman1960local}
-guarantees that the nonlinear system's local phase portrait is topologically
-equivalent to the linearization when no eigenvalue of $\mathbf{G}$ lies on the
-unit circle.
-$\rho(\mathbf{G}) < 1$ implies local asymptotic stability;
-$\rho(\mathbf{G}) > 1$ implies local instability.
+The linearization is locally valid when no eigenvalue of $\mathbf{G}$ lies on
+the unit circle: $\rho(\mathbf{G}) < 1$ implies local asymptotic stability,
+$\rho(\mathbf{G}) > 1$ implies local
+instability.\footnote{This is the discrete Hartman-Grobman
+theorem~\cite{hartman1960lemma,grobman1959homeomorphisms,hartman1960local}: the
+nonlinear system's local phase portrait is topologically equivalent to its
+linearization at a hyperbolic fixed point.}
 
-\paragraph{Monotonicity.} For $\mathbf{G} \geq 0$, $\rho(\mathbf{G})$ is
-non-decreasing in every entry (Perron-Frobenius property~3). If recovery becomes
-relatively more expensive as headroom shrinks---true for every system in this
-paper except TCP---then $\rho(\mathbf{G})$ is non-decreasing in load. The
-boundary $\mathbf{h}^*$ is a clean phase transition: stable on one side, cascade
-on the other. The nonlinear system may reach instability sooner than the
-linearization predicts (a large perturbation can cross $\mathbf{h}^*$ even from
-a locally stable operating point), and once past $\mathbf{h}^*$ it cannot
-self-rescue. The linearized $\mathbf{h}^*$ is therefore a necessary condition
-for stability, not a sufficient one: resistance to large perturbations requires
-headroom margin beyond $\mathbf{h}^*$. The linear analysis never gives false
-instability warnings---if $\rho(\mathbf{G}) \geq 1$, the system \emph{will}
-cascade---but it can give false assurance of robustness when the basin of
-attraction is smaller than the perturbation.
-
-\paragraph{Quantitative margins.} For exact convergence rates, overshoot, or
-dynamics near $\rho(\mathbf{G}) = 1$, Lyapunov stability analysis provides the
-general framework: construct $V(x)$ decreasing along trajectories; existence
-proves stability, rate of decrease bounds
-convergence~\cite{hirsch1985systems,smith1995monotone}. For the monotone case,
-the theory of cooperative dynamical systems gives stronger structure: trajectories
-are ordered, limit sets are equilibria, and the worst-case trajectory is
-computable by evaluating $\mathbf{G}$ at its maximum entries.
+For $\mathbf{G} \geq 0$, the monotonicity of $\rho(\mathbf{G})$ in load
+(established in \cref{sec:gain-matrix}) means the boundary $\mathbf{h}^*$ is a
+clean phase transition. The nonlinear system may reach instability sooner than
+the linearization predicts---a large perturbation can cross $\mathbf{h}^*$ even
+from a locally stable operating point---but once past $\mathbf{h}^*$ it cannot
+self-rescue. The linear analysis never gives false instability warnings: if
+$\rho(\mathbf{G}) \geq 1$, the system \emph{will} cascade. But it can give
+false assurance of robustness when the basin of attraction is smaller than the
+perturbation. Resistance to large perturbations requires headroom margin beyond
+$\mathbf{h}^*$.\footnote{For exact convergence rates and dynamics near
+$\rho(\mathbf{G}) = 1$, Lyapunov stability analysis and the theory of
+cooperative dynamical
+systems~\cite{hirsch1985systems,smith1995monotone} provide stronger quantitative
+bounds.}
 
 \bibliographystyle{plain}
 \bibliography{references}
