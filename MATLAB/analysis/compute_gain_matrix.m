@@ -7,7 +7,7 @@ function G = compute_gain_matrix(params)
 %   Types:
 %     'tcp'       - scalar G = -0.5 (exponential backoff halves rate)
 %     'swap'      - 2x2 cross-resource [epsilon, alpha; beta, epsilon] (rows: disk, memory)
-%     'cassandra' - 2x2 disk/CPU feedback during hint replay
+%     'cassandra' - scalar disk-dominated gain (M/M/1 phase transition)
 %     'oom'       - scalar G = alloc_on_restart / mem_freed
 
     % MATLAB's switch/case compares strings with strcmp internally — no need for strcmp() yourself
@@ -29,25 +29,50 @@ function G = compute_gain_matrix(params)
             G = [eps_, alpha; beta, eps_];
 
         case 'cassandra'
-            % During hint replay:
-            % g_disk_disk: disk contention self-amplification
-            % g_disk_cpu:  CPU contention -> slower disk ops -> more queuing
-            % g_cpu_disk:  disk saturation -> blocked threads -> CPU waste
-            % g_cpu_cpu:   CPU contention self-amplification (read repairs)
+            % The Cassandra cascade is disk-dominated. The feedback loop:
+            %   hint replay -> IOPS increase -> disk utilization u rises
+            %   -> read latency rises (M/M/1: L = b/(1-u))
+            %   -> timeouts when L > tau -> read repairs (c_r IOPS each)
+            %   -> more IOPS (loop)
             %
-            % The read repair cascade:
-            %   high disk util -> high read latency (M/M/1) -> timeouts
-            %   -> read repairs -> more disk IOPS + more CPU
-            repair_iops    = params.repair_cost;        % IOPS per read repair
-            timeout_rate   = params.read_rate * params.timeout_fraction;
-            repair_cpu     = params.repair_cpu_cost;    % CPU fraction per repair
+            % The gain is derived via chain rule through the M/M/1 model:
+            %   d(u)/d(-h) = 1/D_t
+            %   d(tf)/d(u) = tau/b       (timeout fraction sensitivity)
+            %   d(repair_IOPS)/d(tf) = c_r * r_r
+            %
+            % Composed: g = c_r * r_r * tau / (b * D_t)
+            %
+            % This gain is zero below the critical utilization u* = 1 - b/tau
+            % (no timeouts, no feedback) and jumps to >> 1 above it (phase
+            % transition). See derive_cassandra_hstar.m for full derivation.
+            %
+            % Scalar because disk dominates: eigenvalue analysis of the 2x2
+            % disk/CPU matrix shows the dominant eigenvalue is ~g_dd. CPU
+            % terms contribute negligibly.
 
-            % Gain: how much additional recovery per unit headroom lost
-            g_dd = repair_iops * timeout_rate / params.D_total;
-            g_dc = 0.1;   % CPU contention has minor effect on disk
-            g_cd = repair_cpu * timeout_rate / 1.0;  % disk pressure -> CPU via repairs
-            g_cc = 0.1;   % CPU self-amplification (context switching)
-            G = [g_dd, g_dc; g_cd, g_cc];
+            c_r = params.repair_cost;          % IOPS per read repair
+            r_r = params.read_rate;            % reads/sec
+            b   = params.base_latency;         % base read latency (seconds)
+            tau = params.read_timeout;          % read timeout threshold (seconds)
+            D_t = params.D_total;              % total disk IOPS capacity
+
+            % Critical utilization where timeouts begin (from M/M/1)
+            u_star = 1 - b / tau;
+
+            % Current disk utilization (without repair feedback)
+            D_n = params.D_normal;
+            u_current = D_n / D_t;
+            if isfield(params, 'replay_rate')
+                u_current = (D_n + params.replay_rate) / D_t;
+            end
+
+            if u_current > u_star
+                % Above threshold: feedback gain from chain rule
+                G = c_r * r_r * tau / (b * D_t);
+            else
+                % Below threshold: no timeouts, no repair feedback
+                G = 0;
+            end
 
         case 'oom'
             % Scalar: ratio of memory allocated on restart to memory freed by kill

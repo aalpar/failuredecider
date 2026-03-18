@@ -207,10 +207,13 @@ correctness depends on no layer exceeding its boundary.
 
 TCP's design is not just good engineering intuition---it satisfies a precise
 invariant that separates safe automatic recovery from cascading failure. The
-invariant has three levels. Each is necessary. Together they guarantee bounded
-recovery when the system's dynamics near the operating point are modeled as a
-first-order linearized system (\cref{sec:gain-matrix});
-\cref{sec:nonlinearity} bounds the gap to the nonlinear system.
+invariant has three levels. Each is necessary. When all three hold, recovery
+converges locally---within the linearization radius of the current operating
+point (\cref{sec:gain-matrix}). The monotonicity result
+(\cref{sec:gain-matrix}) ensures the computed $h^*$ is a lower bound on the
+true stability boundary: the framework never declares safety when danger exists,
+though it may declare danger when safety exists.
+\Cref{sec:nonlinearity} bounds the gap to the nonlinear system.
 
 \subsection{Precondition: You Need a Resource Model}
 
@@ -621,33 +624,55 @@ in progress). The key property is not whether a system automates---z/OS automate
 extensively---but whether \emph{wrong} automatic decisions are surfaced before
 their consequences become permanent.
 
-\section{Decision Authority Tracks Information Asymmetry}
+The historical sequence matters. IBM's OS/360 (1964) established mandatory
+compensation boundaries---region sizes, operator-in-the-loop escalation via
+WTO/WTOR---before UNIX existed. UNIX's designers chose a different philosophy:
+permissive defaults, graceful degradation, opt-in resource limits. The
+distributed systems community inherited UNIX's choice wholesale. The formal
+framework presented here provides the mathematical basis for IBM's original
+design: there is a computable boundary $h^*$ below which automated recovery is
+provably safe and above which it is provably intractable under production load.
+IBM enforced this boundary by convention; the framework shows it can be derived
+from measured system parameters.
+
+\section{Decision Authority Tracks Recovery Fitness}
 
 The design principle that ties the preceding sections together:
 
 \begin{quote}
-Automatic decisions are safe when the decider has sufficient information to
-guarantee the recovery invariant. When information is insufficient, the system
-must surface state to the entity that \emph{can} distinguish---and wait.
+A system may automate recovery when it can demonstrate that recovery bandwidth
+fits within available headroom---that $h(t) > h^*$ for its current state. This
+is a computable condition: the gain matrix $\mathbf{G}$ and the spectral radius
+$\rho(\mathbf{G})$ provide the test. When the condition holds, automated
+recovery is a proven contraction. When it does not hold, recovery under
+production load is intractable. The system's correct action is to emit
+diagnostic state and shut down, deferring recovery to an offline context where
+production load is zero and the bandwidth constraint is trivially satisfied.
 \end{quote}
 
 \begin{small}
-\noindent\begin{tabularx}{\textwidth}{@{}lXl@{}}
+\noindent\begin{tabularx}{\textwidth}{@{}lXXl@{}}
 \toprule
-Decider & Has information about & Can safely decide \\
+Decision & Can prove recovery fits? & Reversal cost if wrong & Action \\
 \midrule
-TCP & Measured RTT, retry history, bounded retransmission cost
-  & ``Connection is dead'' \\
-Application & Service topology, redundancy, retry policy
-  & ``Retry elsewhere'' \\
-Operator & Physical world, business context, acceptable risk
-  & ``Node is permanently gone'' \\
+TCP retransmission & Yes ($G = -0.5$, contraction) & N/A (always converges) & Automate \\
+Remove backend from LB & Yes (re-add: L1--L3 trivial) & Bounded: seconds of wasted capacity & Automate \\
+Cassandra hint replay & Depends: safe when $R < R^*$ & Offline reversible: must quiesce & Automate if L2-throttled; shut down otherwise \\
+OOM kill & No (restart cost unknown, L0 violation) & Unbounded & Emit state, shut down \\
+Tombstone GC & No (membership unknown, FLP) & Irreversible: zombie resurrection & Escalate to operator \\
 \bottomrule
 \end{tabularx}
 \end{small}
 
-Each layer can make decisions within its information boundary. No layer should
-make decisions outside it.\footnote{DHCP lease expiry faces the same structural
+The governing variable is whether the system can prove---from its gain matrix
+and current headroom---that recovery converges. A load balancer removing a
+backend can prove this: re-adding costs one config update, satisfying L1--L3
+trivially. Tombstone GC cannot: the consequences of being wrong (zombie
+resurrection) have no recovery action at all. Between these extremes, Cassandra
+hint replay illustrates the critical middle case: the recovery action is correct,
+but its bandwidth cost may exceed available headroom. The system must either
+throttle to fit (L2 bound) or shut down and recover
+offline.\footnote{DHCP lease expiry faces the same structural
 problem---``lease expired'' is not ``address unused''---but largely avoids it
 through protocol design: the client contractually agrees to stop using the
 address at expiry, and Duplicate Address Detection (RFC~5227) catches most
@@ -728,17 +753,20 @@ cluster.
     and pauses when headroom is exhausted.
 \end{enumerate}
 
-The result is a compensation boundary drawn where the information boundary
-actually is: the system compensates for things it can measure (replication lag,
-tombstone pressure) and surfaces everything else. No wall-clock constant
-substitutes for operator judgment. No automatic action has unbounded
-consequences.
+The result is a compensation boundary drawn where the provability boundary
+actually is: the system automates recovery when it can prove recovery bandwidth
+fits within headroom (L2-throttled Merkle reconciliation), and surfaces
+everything else to the operator (peer membership decisions). No wall-clock
+constant substitutes for operator judgment. No automatic action has consequences
+that exceed available headroom.
 
 \section{Design Rules}
 
 \begin{enumerate}
-  \item \textbf{Separate local decisions from semantic decisions.} TCP can kill a
-    connection; only an operator can kill a node.
+  \item \textbf{Automate decisions whose reversal satisfies the recovery
+    invariant. Escalate decisions whose consequences are irreversible or
+    unbounded.} TCP can kill a connection (reversal: reconnect, L1--L3 trivial).
+    Only an operator can decommission a node (reversal: rebuild, offline only).
 
   \item \textbf{Derive timeouts from measured properties.} If you cannot measure
     it, you cannot timeout on it safely.
@@ -756,8 +784,10 @@ consequences.
     retransmissions from the application---it surfaces \texttt{ETIMEDOUT}. Your
     system should not hide peer lag from the operator.
 
-  \item \textbf{Prefer recoverable pessimism over unrecoverable optimism.} A
-    slow operator is recoverable. Silent data loss is not.
+  \item \textbf{If you cannot prove L1--L3 under current load, emit diagnostic
+    state and shut down.} Do not attempt recovery that may violate the invariant.
+    Do not continue operating in a state you cannot characterize. Shutdown is
+    recoverable. Silent cascade is not.
 \end{enumerate}
 
 \section{Related Work}
@@ -1029,6 +1059,78 @@ Self-rescue under overload & Impossible & Possible \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\section{Computing $h^*$: Cassandra Hint Replay}
+\label{sec:cassandra-hstar}
+
+Cassandra's cascade is disk-dominated: single resource (disk IOPS), scalar gain
+with a nonlinear trigger.
+
+During an outage, hints accumulate at the write rate. On return, they replay at a
+throttled rate $R$, adding to normal disk load $D_n$. Disk utilization:
+\begin{equation}
+  u = \frac{D_n + R}{D_t}
+\end{equation}
+
+Read latency follows the M/M/1 queueing model:
+\begin{equation}
+  L = \frac{b}{1 - u}
+\end{equation}
+where $b$ is the base read latency under no contention. Timeouts occur when $L$
+exceeds the read timeout threshold $\tau$:
+\begin{equation}
+  u^* = 1 - \frac{b}{\tau}
+\end{equation}
+
+At $u^*$, the feedback loop engages: timeouts trigger read repairs, each costing
+$c_r$ IOPS, which increase utilization further. The feedback gain, derived via
+chain rule through the M/M/1 model:
+\begin{equation}
+  g = \frac{c_r \cdot r_r \cdot \tau}{b \cdot D_t}
+\end{equation}
+where $r_r$ is the read rate. Below $u^*$, $g = 0$---no timeouts, no feedback.
+Above $u^*$, $g \gg 1$ for typical parameters. This is a phase transition, not a
+smooth crossing: the system jumps from stable to violently unstable at $u^*$.
+
+The critical headroom---IOPS margin before cascade:
+\begin{equation}
+  h^* = \frac{D_t \cdot b}{\tau}
+\end{equation}
+
+The safe replay rate---maximum hint replay before crossing $u^*$:
+\begin{equation}
+  R^* = D_t \left(1 - \frac{b}{\tau}\right) - D_n
+\end{equation}
+
+Computed for a Cassandra node with $D_t = 500$ IOPS, $D_n = 200$ IOPS,
+$b = 5$\,ms, $\tau = 500$\,ms, $c_r = 3$ IOPS/repair, $r_r = 5{,}000$
+reads/sec:
+
+\begin{center}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+Quantity & Value & \\
+\midrule
+$u^*$ & 0.99 & 99\% utilization \\
+$h^*$ & 5 IOPS & 1\% of disk capacity \\
+$R^*$ & 295 ops/sec & safe replay rate \\
+$g$ (above $u^*$) & 3{,}000 & gain above threshold \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At 5~IOPS of headroom---1\% of a 500-IOPS disk---the read repair feedback gain
+jumps from zero to 3{,}000. The default Cassandra throttle (128~ops/sec) is
+safe; raising it to 300 is cascade.
+
+\paragraph{Structural contrast with swap.} Both $h^*$ values are closed-form
+functions of measurable quantities. The instability structures differ: swap has a
+smooth transition ($\rho$ crosses 1 as load increases; the linearized $h^*$ is a
+conservative lower bound). Cassandra has a phase transition (gain jumps from 0 to
+$\gg 1$ at $u^*$). The M/M/1 nonlinearity creates a cliff, not a slope. The
+linearization critique (Hartman-Grobman radius unknown) applies to swap's smooth
+boundary but not to Cassandra's discontinuous one---the phase transition
+\emph{is} the nonlinearity, computed exactly.
 
 \section{Note on Nonlinearity}
 \label{sec:nonlinearity}

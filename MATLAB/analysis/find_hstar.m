@@ -3,9 +3,10 @@ function [h_star, details] = find_hstar(sys_type, params)
 %
 %   [h_star, details] = find_hstar(sys_type, params)
 %
-%   For 'tcp': returns Inf (no h* — unconditionally stable)
-%   For 'swap': returns E* in pages (closed-form)
-%   For 'oom': returns critical G = 1 boundary (alloc = freed)
+%   For 'tcp':       returns Inf (no h* — unconditionally stable)
+%   For 'swap':      returns E* in pages (closed-form: D'W/2f)
+%   For 'cassandra': returns h* in IOPS (closed-form: D_t * b / tau)
+%   For 'oom':       returns critical G = 1 boundary (alloc = freed)
 
     % struct() creates an empty struct. Fields are added dynamically via dot notation below.
     details = struct();
@@ -39,36 +40,75 @@ function [h_star, details] = find_hstar(sys_type, params)
                 h_star, h_star * 4 / 1000);
 
         case 'cassandra'
-            % linspace(a, b, n) creates n evenly-spaced points between a and b. Used here to sweep replay rates.
-            throttles = linspace(1, params.D_total, 1000);
+            % Closed-form h* from M/M/1 latency model.
+            %
+            % Timeouts begin when disk utilization u > u* = 1 - b/tau.
+            % At that point, the read repair feedback gain jumps from 0
+            % to g = c_r * r_r * tau / (b * D_t), which is >> 1 for
+            % typical parameters (phase transition, not smooth crossing).
+            %
+            % h* is the headroom (IOPS) at which u = u*:
+            %   h* = D_t * b / tau
+            %
+            % The safe replay rate (IOPS available for replay before
+            % crossing u*):
+            %   R* = D_t * (1 - b/tau) - D_normal
+            %
+            % See derive_cassandra_hstar.m for full symbolic derivation.
+
+            b   = params.base_latency;
+            tau = params.read_timeout;
+            D_t = params.D_total;
+            D_n = params.D_normal;
+            c_r = params.repair_cost;
+            r_r = params.read_rate;
+
+            % Critical utilization and headroom
+            u_star = 1 - b / tau;
+            h_star = D_t * b / tau;
+
+            % Safe replay rate
+            R_star = D_t * u_star - D_n;
+
+            % Gain above threshold (for reporting)
+            gain_above = c_r * r_r * tau / (b * D_t);
+
+            details.u_star = u_star;
+            details.h_star_IOPS = h_star;
+            details.R_star = R_star;
+            details.gain_above_threshold = gain_above;
+            details.msg = sprintf(['h* = %.1f IOPS (u* = %.4f). ' ...
+                'Safe replay rate R* = %.0f ops/sec. ' ...
+                'Gain above threshold: %.0f (phase transition).'], ...
+                h_star, u_star, R_star, gain_above);
+
+            % Numerical verification: sweep replay rates and confirm the
+            % closed-form boundary matches. Kept for validation, not for
+            % computing h*.
+            throttles = linspace(1, D_t, 1000);
             rho_vals = zeros(size(throttles));
             for i = 1:numel(throttles)
-                p = params;
-                p.timeout_fraction = estimate_timeout_fraction(p, throttles(i));
-                G = compute_gain_matrix(p);
-                rho_vals(i) = max(abs(eig(G)));
+                p_sweep = params;
+                p_sweep.replay_rate = throttles(i);
+                G = compute_gain_matrix(p_sweep);
+                % G is now scalar for cassandra; max(abs(eig(G))) = abs(G)
+                if isscalar(G)
+                    rho_vals(i) = abs(G);
+                else
+                    rho_vals(i) = max(abs(eig(G)));
+                end
             end
-            % find(..., 1, 'first') returns the index of the first element matching the condition. Empty if none match.
+            details.sweep.throttles = throttles;
+            details.sweep.rho_vals = rho_vals;
+
+            % Verify closed form matches sweep
             idx = find(rho_vals >= 1, 1, 'first');
-            if isempty(idx)
-                h_star = Inf;
-                details.msg = 'No h* found — stable at all replay rates';
-            else
-                h_star = throttles(idx);
-                details.msg = sprintf('Cascade at replay_throttle >= %.0f ops/sec', h_star);
+            if ~isempty(idx)
+                details.sweep.cascade_at = throttles(idx);
+                details.sweep.matches_closed_form = abs(throttles(idx) - R_star) < (D_t / 1000);
             end
-            details.throttles = throttles;
-            details.rho_vals = rho_vals;
 
         otherwise
             error('find_hstar:unknownType', 'Unknown type: %s', sys_type);
     end
-end
-
-% Local function: estimates what fraction of reads timeout given a replay rate. Uses M/M/1 queueing model: latency = base / (1 - utilization).
-function tf = estimate_timeout_fraction(params, replay_rate)
-    total_iops = params.D_normal + replay_rate;
-    util = min(total_iops / params.D_total, 0.999);
-    latency = params.base_latency / (1 - util);
-    tf = min(1, max(0, (latency - params.read_timeout) / latency));
 end

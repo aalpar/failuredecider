@@ -18,7 +18,11 @@ function fig = sweep_stability(sys_type, param_name, param_range, base_params)
                 G = compute_gain_matrix(p);
             case 'cassandra'
                 p.type = 'cassandra';
-                p.timeout_fraction = estimate_timeout_fraction_sweep(p);
+                % Set replay_rate from the swept parameter (or from
+                % replay_throttle if sweeping something else).
+                if ~isfield(p, 'replay_rate')
+                    p.replay_rate = p.replay_throttle;
+                end
                 G = compute_gain_matrix(p);
             case 'oom'
                 p.type = 'oom';
@@ -57,11 +61,4 @@ function fig = sweep_stability(sys_type, param_name, param_range, base_params)
     ylim(ylims);
     grid on;
     hold off;
-end
-
-function tf = estimate_timeout_fraction_sweep(params)
-    total_iops = params.D_normal + params.replay_throttle;
-    util = min(total_iops / params.D_total, 0.999);
-    latency = params.base_latency / (1 - util);
-    tf = min(1, max(0, (latency - params.read_timeout) / latency));
 end

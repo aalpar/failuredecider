@@ -47,6 +47,7 @@ function run_all()
     fprintf('\n--- Symbolic derivations ---\n');
     derive_tcp_stability();
     derive_swap_hstar();
+    derive_cassandra_hstar();
     derive_perron_frobenius();
 
     %% 4. Parameter sweep: swap h* table
@@ -79,7 +80,7 @@ function run_all()
 
     print_table_row('TCP', tcp_result, 'segs on link', '1 segment');
     print_table_row('Swap (HDD,DB)', swap_result, 'pages + IOPS', '1 page, 2 IO');
-    print_table_row('Cassandra', cass_result, '~ partial', '1 write');
+    print_table_row('Cassandra', cass_result, 'disk IOPS', '1 hint');
     print_table_row('OOM (G=1.2)', oom_result, 'alloc unknown', '1 kill');
 
     %% 6. Run full verification suite
@@ -157,11 +158,15 @@ end
 function sys = make_cassandra_sys()
     p = cassandra_params();
     sys.name  = 'Cassandra';
-    sys.n     = 2;  % disk, cpu
-    sys.C     = [p.D_total; 1.0];  % IOPS, CPU fraction
-    sys.w     = @(t) [p.D_normal; 0.3];
-    sys.delta = [1; p.repair_cpu_cost];
-    p.timeout_fraction = 0.3;  % worst-case during replay
+    sys.n     = 1;  % disk IOPS (disk-dominated cascade)
+    sys.C     = p.D_total;
+    sys.w     = @(t) p.D_normal;
+    sys.delta = 1;  % one hint replay = ~1 IOPS
+
+    % Compute gain at a replay rate that puts the system above u*.
+    % u* = 1 - base_latency/read_timeout. The gain matrix is scalar and
+    % state-dependent: zero below u*, c_r*r_r*tau/(b*D_t) above.
+    p.replay_rate = p.replay_throttle;
     sys.G     = compute_gain_matrix(p);
     sys.r     = @(t, h) cassandra_recovery(t, h, p);
 end
@@ -169,9 +174,9 @@ end
 % Recovery is zero during outage, then ramps up after T_outage seconds.
 function r = cassandra_recovery(t, ~, p)
     if t < p.T_outage
-        r = [0; 0];
+        r = 0;
     else
-        r = [p.replay_throttle; 0.05];
+        r = p.replay_throttle;
     end
 end
 

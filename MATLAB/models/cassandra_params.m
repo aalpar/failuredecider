@@ -28,9 +28,10 @@ function p = cassandra_params()
     p.repair_cost     = 3;       % IOPS per read repair
     p.repair_cpu_cost = 0.01;    % CPU fraction per read repair
 
-    % Derived (set during simulation)
-    p.timeout_fraction = 0;      % fraction of reads that timeout (computed dynamically)
-    % This gets overwritten during simulation — declared here so the struct field exists
+    % Derived: set during analysis or simulation
+    p.replay_rate     = 0;       % current replay rate (ops/sec), set by caller
+    % compute_gain_matrix uses this to determine whether the system is
+    % above or below the critical utilization u* = 1 - base_latency/read_timeout.
 
     p.sim_time        = 1800;    % simulate 30 minutes
 end

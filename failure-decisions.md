@@ -141,7 +141,9 @@ Swap crosses resource domains — it trades memory capacity (stock) for disk ban
 | f | Distinct page access rate (all processes) | pages/sec |
 | D' | Spare disk IOPS (total minus normal workload) | IOPS |
 
-Under uniform access, the probability of hitting a swapped-out page is E/W. Each fault costs 2 IOPS (swap-in read + swap-out write):
+Under uniform access, the probability of hitting a swapped-out page is E/W. Real workloads have locality: under the working set model (Denning 1968), fault rate is near-zero while working sets fit in physical memory and spikes when they do not. The uniform assumption smooths this transition, yielding a lower bound on E\* — the true margin is larger, but the failure at the true boundary is sharper than the smooth model depicts. The table values below are conservative estimates of the minimum margin.
+
+Each fault costs 2 IOPS (swap-in read + swap-out write):
 
 > **P = 2f · E / W**
 
@@ -199,6 +201,53 @@ Perron-Frobenius does not apply — G has a negative entry. ρ(|G|) = 0.5 < 1 at
 | h\* exists | Always | May not |
 | Self-rescue under overload | Impossible | Possible |
 
+#### Computing h\*: Cassandra Hint Replay
+
+Cassandra's cascade is disk-dominated: single resource (disk IOPS), scalar gain with a nonlinear trigger.
+
+During an outage, hints accumulate at the write rate. On return, they replay at a throttled rate R, adding to normal disk load D_n. Disk utilization:
+
+> **u = (D_n + R) / D_t**
+
+Read latency follows the M/M/1 queueing model:
+
+> **L = b / (1 − u)**
+
+where b is the base read latency under no contention. Timeouts occur when L exceeds the read timeout threshold τ:
+
+> **u\* = 1 − b/τ**
+
+At u\*, the feedback loop engages: timeouts trigger read repairs, each costing c_r IOPS, which increase utilization further. The feedback gain, derived via chain rule through the M/M/1 model:
+
+> **g = c_r · r_r · τ / (b · D_t)**
+
+where r_r is the read rate. Below u\*, g = 0 — no timeouts, no feedback. Above u\*, g >> 1 for typical parameters. This is a phase transition, not a smooth crossing: the system jumps from stable to violently unstable at u\*.
+
+The critical headroom — IOPS margin before cascade:
+
+> **h\* = D_t · b / τ**
+
+The safe replay rate — maximum hint replay before crossing u\*:
+
+> **R\* = D_t · (1 − b/τ) − D_n**
+
+| Parameter | Value | |
+|-----------|-------|---|
+| D_t (disk capacity) | 500 IOPS | |
+| D_n (normal load) | 200 IOPS | |
+| b (base latency) | 5 ms | |
+| τ (read timeout) | 500 ms | |
+| c_r (repair cost) | 3 IOPS | |
+| r_r (read rate) | 5,000 reads/sec | |
+| **u\*** | **0.99** | 99% utilization |
+| **h\*** | **5 IOPS** | 1% of disk capacity |
+| **R\*** | **295 ops/sec** | safe replay rate |
+| **g (above u\*)** | **3,000** | gain above threshold |
+
+At 5 IOPS of headroom — 1% of a 500-IOPS disk — the read repair feedback gain jumps from zero to 3,000. The default Cassandra throttle (128 ops/sec) is safe; raising it to 300 is cascade.
+
+**Structural contrast with swap.** Both h\* values are closed-form functions of measurable quantities. The instability structures differ: swap has a smooth transition (ρ crosses 1 as load increases, linearized h\* is a conservative lower bound). Cassandra has a phase transition (gain jumps from 0 to >> 1 at u\*). The M/M/1 nonlinearity creates a cliff, not a slope. The linearization critique (Hartman-Grobman radius unknown) applies to swap's smooth boundary but not to Cassandra's discontinuous one — the phase transition IS the nonlinearity, computed exactly.
+
 #### Note on Nonlinearity
 
 The gain matrix G is the Jacobian of the recovery dynamics at the current operating point — a local linearization. Three results bound the gap between the linear model and the nonlinear system.
@@ -211,7 +260,7 @@ The gain matrix G is the Jacobian of the recovery dynamics at the current operat
 
 ### 4. The Recovery Invariant
 
-For automatic recovery to be safe, it must satisfy three conditions. Each is necessary; only all three together are sufficient.
+For automatic recovery to be safe, it must satisfy three conditions. Each is necessary. When all three hold, recovery converges locally — within the linearization radius of the current operating point. The monotonicity result (Perron-Frobenius, section 3) ensures the computed h\* is a lower bound on the true stability boundary: the framework never declares safety when danger exists, though it may declare danger when safety exists.
 
 #### Precondition: Resource Model
 
@@ -311,19 +360,23 @@ UNIX does have tools that push the boundary outward: disk quotas (EDQUOT), ulimi
 
 The pattern: as the compensation boundary moves inward, the system's failure modes shift from *recoverable* (operator gets a message, decides what to do) to *unrecoverable* (data silently lost, wrong process killed, cascade already in progress). The key property isn't whether a system automates — z/OS automates extensively — but whether *wrong* automatic decisions are surfaced before their consequences become permanent.
 
-### 6. Decision Authority Tracks Information Asymmetry
+The historical sequence matters. IBM's OS/360 (1964) established mandatory compensation boundaries — region sizes, operator-in-the-loop escalation via WTO/WTOR — before UNIX existed. UNIX's designers chose a different philosophy: permissive defaults, graceful degradation, opt-in resource limits. The distributed systems community inherited UNIX's choice wholesale. The formal framework presented here provides the mathematical basis for IBM's original design: there is a computable boundary h\* below which automated recovery is provably safe and above which it is provably intractable under production load. IBM enforced this boundary by convention; the framework shows it can be derived from measured system parameters.
+
+### 6. Decision Authority Tracks Recovery Fitness
 
 The design principle:
 
-> Automatic decisions are safe when the decider has sufficient information to guarantee the recovery invariant. When information is insufficient, the system must surface state to the entity that *can* distinguish — and wait.
+> A system may automate recovery when it can demonstrate that recovery bandwidth fits within available headroom — that h(t) > h\* for its current state. This is a computable condition: the gain matrix G and the spectral radius ρ(G) provide the test. When the condition holds, automated recovery is a proven contraction. When it does not hold, recovery under production load is intractable. The system's correct action is to emit diagnostic state and shut down, deferring recovery to an offline context where production load is zero and the bandwidth constraint is trivially satisfied.
 
-| Decider | Has information about | Can safely decide |
-|---------|----------------------|-------------------|
-| TCP | Measured RTT, retry history, bounded retransmission cost | "This connection is dead" |
-| Application | Service topology, redundancy, retry policy | "Retry with a different server" |
-| Operator | Physical world, business context, acceptable risk | "This node is permanently gone" |
+| Decision | Can prove recovery fits? | Reversal cost if wrong | Action |
+|----------|--------------------------|------------------------|--------|
+| TCP retransmission | Yes (G = −0.5, contraction) | N/A (always converges) | Automate |
+| Remove backend from LB | Yes (re-add costs one config update, L1-L3 trivial) | Bounded: seconds of wasted capacity | Automate |
+| Cassandra hint replay | Depends: safe when R < R\* = D_t(1 − b/τ) − D_n | Offline reversible: must quiesce if burst exceeds L2 | Automate only if rate-limited by L2 headroom; shut down if headroom exhausted |
+| OOM kill | No (restart cost unknown to kernel, L0 violation) | Unbounded: depends on process state, supervisor policy | Emit state, shut down |
+| Tombstone GC | No (membership unknown, FLP regime) | Irreversible: zombie resurrection | Escalate to operator |
 
-Each layer can make decisions within its information boundary. No layer should make decisions outside it.[^5]
+The governing variable is whether the system can prove — from its gain matrix and current headroom — that recovery converges. A load balancer removing a backend can prove this: re-adding costs one config update, satisfying L1-L3 trivially. Tombstone GC cannot: the consequences of being wrong (zombie resurrection) have no recovery action at all. Between these extremes, Cassandra hint replay illustrates the critical middle case: the recovery action is correct, but its bandwidth cost may exceed available headroom. The system must either throttle to fit (L2 bound) or shut down and recover offline.[^5]
 
 ### 7. Applying the Principles: CRDT Tombstone GC
 
@@ -343,20 +396,20 @@ CRDTs track deletions with tombstones — markers that say "this key was deleted
 
 3. **Reserve the semantic decision for the entity with sufficient information.** `RemovePeer()` is the only call that declares a node gone. It requires the operator — the one entity that can check whether the hardware is dead, whether the network is partitioned, whether the node is being decommissioned. The system will not make this call on its own.
 
-4. **Make the recovery action satisfy the invariant.** If a removed peer returns, it performs a full state transfer rather than delta replay. The returning node bears the cost of reconciliation, and that cost is bounded by the current state size — it doesn't scale with the duration of absence the way accumulated hints do. The cluster doesn't experience a burst.
+4. **Make the recovery action satisfy the invariant.** If a removed peer returns, it reconciles via *asymmetric* Merkle-tree anti-entropy — comparing hash trees with each replica, identifying divergent ranges, and pulling only the cluster's current state for those ranges. Reconciliation is pull-only: the returning node does not push stale data back to the cluster, preventing zombie resurrection for keys whose tombstones were GC'd after removal. No stored delta log is needed — divergence is discovered by comparing current state directly. Cost is O(|diff|): proportional to actual divergence, not to state size or absence duration. The returning node pulls at a rate bounded by level 2 headroom — available capacity minus current load — so the cluster does not experience a burst. The framework's own invariant defines the throttle: reconciliation proceeds while r(t) < C(t) − w(t) and pauses when headroom is exhausted.
 
-The result is a compensation boundary drawn where the information boundary actually is: the system compensates for things it can measure (replication lag, tombstone pressure) and surfaces everything else. No wall-clock constant substitutes for operator judgment. No automatic action has unbounded consequences.
+The result is a compensation boundary drawn where the provability boundary actually is: the system automates recovery when it can prove recovery bandwidth fits within headroom (L2-throttled Merkle reconciliation), and surfaces everything else to the operator (peer membership decisions). No wall-clock constant substitutes for operator judgment. No automatic action has consequences that exceed available headroom.
 
 ### 8. Design Rules
 
 Distill into actionable rules for system designers:
 
-1. **Separate local decisions from semantic decisions.** TCP can kill a connection; only an operator can kill a node.
+1. **Automate decisions whose reversal satisfies the recovery invariant. Escalate decisions whose consequences are irreversible or unbounded.** TCP can kill a connection (reversal: reconnect, L1-L3 trivial). Only an operator can decommission a node (reversal: rebuild, offline only).
 2. **Derive timeouts from measured properties.** If you can't measure it, you can't timeout on it safely.
 3. **Check all three levels of the recovery invariant.** Individual cost bounded (level 1) is necessary but insufficient — also verify that aggregate recovery rate doesn't exceed freed capacity (level 2) and that recovery actions don't feed back into the failure condition (level 3). If level 3 fails, it's a cascade seed.
 4. **Surface state, don't hide it.** When you can't decide safely, expose what you know to whoever can.
 5. **Make failure a first-class API.** TCP doesn't hide retransmissions from the application — it surfaces ETIMEDOUT. Your system shouldn't hide peer lag from the operator.
-6. **Prefer recoverable pessimism over unrecoverable optimism.** A slow operator is recoverable. Silent data loss is not.
+6. **If you cannot prove L1-L3 under current load, emit diagnostic state and shut down.** Don't attempt recovery that may violate the invariant. Don't continue operating in a state you cannot characterize. Shutdown is recoverable. Silent cascade is not.
 
 [^1]: The term *compensating action* originates in transaction processing, where a compensating transaction undoes the effects of a committed transaction that cannot be rolled back (Gray & Reuter, *Transaction Processing: Concepts and Techniques*, Morgan Kaufmann, 1993). *Decompensation* — the exhaustion of adaptive capacity when recovery mechanisms become the dominant load source — is David Woods' contribution (see Related Work). The *compensation boundary* as used here — the architectural point where the system stops surfacing failure and starts acting on it — is a framing specific to this article, combining the transactional concept (what is a compensating action?) with the resilience engineering concept (when does compensation become the problem?) and adding the design question: *where should the system draw that line?*
 
