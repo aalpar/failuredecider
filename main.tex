@@ -377,7 +377,8 @@ The OOM killer can violate this: a process supervisor restarts the killed
 process, which allocates memory, which recreates the pressure that triggered the
 kill. The feedback loop gain depends on external configuration (supervisor
 policy) that the kernel does not know about---another instance of a system making
-decisions outside its information boundary.
+decisions outside its information boundary (\cref{sec:oom-hstar} formalizes
+this gain ratio and shows why the kernel cannot evaluate it).
 
 Cassandra's hinted handoff can violate this: burst replay causes CPU/IO
 contention $\to$ read latencies spike $\to$ read timeouts trigger read repairs
@@ -1132,6 +1133,43 @@ $\gg 1$ at $u^*$). The M/M/1 nonlinearity creates a cliff, not a slope. The
 linearization critique (Hartman-Grobman radius unknown) applies to swap's smooth
 boundary but not to Cassandra's discontinuous one---the phase transition
 \emph{is} the nonlinearity, computed exactly.
+
+\section{The OOM Killer: Why $h^*$ Cannot Be Computed}
+\label{sec:oom-hstar}
+
+The OOM killer operates on a single resource (memory), so the gain is scalar.
+When the kernel kills a process, it frees $m_f$ bytes. If a supervisor restarts
+the process, it allocates $m_r$ bytes during initialization. The gain ratio:
+\begin{equation}
+  G_{\mathrm{oom}} = \frac{m_r}{m_f}
+\end{equation}
+
+When $G_{\mathrm{oom}} < 1$, the kill-restart cycle converges: each iteration
+frees more memory than the restart consumes. When
+$G_{\mathrm{oom}} \geq 1$, the restart allocates at least as much as the kill
+freed, recreating the pressure that triggers the next kill. The cascade
+condition is $G_{\mathrm{oom}} = 1$.
+
+The kernel cannot evaluate $G_{\mathrm{oom}}$. The denominator $m_f$ is
+observable---the kernel knows how much memory a killed process held. The
+numerator $m_r$ depends on process behavior the kernel does not model: JVM heap
+reservation, application startup sequences, supervisor restart policies, memory
+allocation profiles during initialization. The \texttt{oom\_badness} heuristic
+selects \emph{which} process to kill based on current memory
+footprint---estimating $m_f$---but has no model of $m_r$.
+
+This is a level~0 violation: the kernel lacks the resource model for the restart
+consequence of its own action. The gain ratio is not merely unmeasured---it is
+unmeasurable by the acting entity without a model of process startup behavior.
+
+The framework's prescription follows directly: when you cannot compute $h^*$,
+you cannot prove recovery is safe. The correct action is to emit diagnostic
+state---which process was killed, system memory state, recent allocation
+rates---and shut down. Contrast with swap (\cref{sec:swap}), where the kernel
+owns both sides of the gain matrix (page fault rate and disk I/O), and with
+Cassandra (\cref{sec:cassandra-hstar}), where the node owns the disk
+utilization model. The OOM killer is the only case study in this paper where the
+gain ratio is formally unknowable to the entity that acts on it.
 
 \section{Note on Nonlinearity}
 \label{sec:nonlinearity}
