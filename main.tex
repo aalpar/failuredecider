@@ -713,10 +713,19 @@ cluster.
     being decommissioned. The system will not make this call on its own.
 
   \item \textbf{Make the recovery action satisfy the invariant.} If a removed
-    peer returns, it performs a full state transfer rather than delta replay. The
-    returning node bears the cost of reconciliation, and that cost is bounded by
-    the current state size---it does not scale with the duration of absence the
-    way accumulated hints do. The cluster does not experience a burst.
+    peer returns, it reconciles via \emph{asymmetric} Merkle-tree
+    anti-entropy~\cite{decandia2007dynamo}---comparing hash trees with each
+    replica, identifying divergent ranges, and pulling only the cluster's
+    current state for those ranges. Reconciliation is pull-only: the returning
+    node does not push stale data back to the cluster, preventing zombie
+    resurrection for keys whose tombstones were GC'd after removal. No stored
+    delta log is needed---divergence is discovered by comparing current state
+    directly. Cost is $O(|\mathit{diff}|)$: proportional to actual divergence,
+    not to state size or absence duration. The returning node pulls at a rate
+    bounded by level~2 headroom---available capacity minus current load---so
+    the cluster does not experience a burst. The framework's own invariant
+    defines the throttle: reconciliation proceeds while $r(t) < C(t) - w(t)$
+    and pauses when headroom is exhausted.
 \end{enumerate}
 
 The result is a compensation boundary drawn where the information boundary
@@ -800,6 +809,18 @@ decision authority model.
 exponential backoff is well-studied. This paper uses TCP as a pedagogical
 reference design---an existence proof that safe automatic recovery is
 achievable---rather than making new claims about TCP itself.
+
+\paragraph{TCP congestion control stability.} Low, Paganini, and
+Doyle~\cite{low2002internet} analyzed the stability of TCP congestion control
+(Reno, Vegas, FAST) using linearization and spectral conditions on the coupled
+system of $N$ flows sharing $M$ links---the same mathematical framework used
+here. Their stability conditions depend on link delays, flow counts, and AQM
+parameters. Our scalar $G = -0.5$ characterizes the backoff \emph{mechanism}'s
+contraction ratio---each congestion event halves recovery demand for an
+individual flow---not the stability of the composite TCP system. Our
+contribution is a framework for comparing mechanism-level gain properties across
+heterogeneous recovery systems (TCP, swap, Cassandra, OOM), not a new result on
+TCP congestion dynamics.
 
 \appendix
 
@@ -984,6 +1005,15 @@ The monotonicity result does not apply---$G$ has a negative entry.
 $\rho(|G|) = 0.5 < 1$ at all loads. No $h^*$ exists. TCP is unconditionally
 stable, not because recovery is bounded, but because it is a
 \textbf{contraction}: recovery reduces the condition that triggered it.
+
+\emph{Scope.} $G_{\mathrm{TCP}} = -0.5$ is the contraction ratio of the backoff
+mechanism in isolation: a single flow's retransmission rate response to its own
+congestion signal. The system-level stability of TCP congestion
+control---including $N$-flow interaction, AIMD window dynamics, queue feedback,
+and RTT coupling---is a richer problem analyzed by Low et
+al.~\cite{low2002internet} using the same spectral framework. We use TCP here as
+a reference design exhibiting mechanism-level contraction, not as a claim about
+network-level stability.
 
 \begin{center}
 \begin{tabular}{@{}lll@{}}
