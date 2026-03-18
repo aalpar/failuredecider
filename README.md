@@ -1,6 +1,6 @@
 # Don't Let Your System Decide It's Dead
 
-**Paper:** [https://zenodo.org/records/19069195](https://zenodo.org/records/19069195)
+**Paper:** [https://doi.org/10.5281/zenodo.19069194](https://doi.org/10.5281/zenodo.19069194)
 
 Distributed systems fail in two ways: the failure itself, and the system's automatic response to the failure. The second is often worse. This paper identifies a recovery invariant — based on spectral radius of a gain matrix — that separates safe automatic recovery from cascading failure, and a compensation boundary that determines who should make which decisions.
 
