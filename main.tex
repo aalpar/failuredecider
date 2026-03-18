@@ -28,22 +28,23 @@
 
 \begin{abstract}
 Distributed systems fail in two ways: the failure itself, and the system's
-automatic response to the failure. The second is often worse. The root cause is
-systems making semantic decisions with insufficient information---promoting
-``slow'' to ``dead'' based on wall-clock constants rather than measured resource
-models. This paper identifies a precise invariant---the \emph{recovery
-invariant}---that separates safe automatic recovery from cascading failure, and
-a design principle---the \emph{compensation boundary}---that determines who
-should make which decisions. The recovery invariant has three levels: individual
-cost boundedness, aggregate rate boundedness, and feedback stability (spectral
-radius of the recovery gain matrix less than one). The compensation boundary is
-the architectural point where a system stops surfacing failure to a higher
-authority and starts acting on it automatically. We analyze TCP's retransmission
-timeout as a reference design that satisfies all three levels, and show how
-Cassandra's hinted handoff, UNIX swap and OOM killer, and wall-clock-based
-tombstone garbage collection violate them. We connect this framework to the
-metastable failures literature, resilience engineering, and control theory, and
-apply the principles to CRDT tombstone garbage collection as a case study.
+automatic response to the failure. The second is often worse. This paper derives
+a computable boundary~$h^*$ that separates provably safe automatic recovery from
+provably intractable recovery under production load. The boundary emerges from a
+three-level \emph{recovery invariant}---individual cost boundedness, aggregate
+rate boundedness, and feedback stability---formalized through the recovery gain
+matrix~$\mathbf{G}$ and its spectral radius~$\rho(\mathbf{G})$. When headroom
+exceeds~$h^*$, recovery is a proven contraction; when it does not, the system's
+correct action is to emit diagnostic state and shut down. We compute
+closed-form~$h^*$ for UNIX swap thrashing (cross-resource coupling, smooth
+stability transition) and Cassandra hint replay (M/M/1 phase transition: gain
+jumps from 0 to 3{,}000 at 1\% remaining disk headroom). TCP's exponential
+backoff serves as a degenerate reference ($G = -0.5$, unconditionally stable).
+The OOM killer illustrates the opposite extreme: it cannot compute~$h^*$ because
+it lacks a resource model for restart cost. The \emph{compensation
+boundary}---the architectural point where a system stops automating recovery and
+starts emitting state---should be drawn where the provability boundary actually
+is. We apply the framework prescriptively to CRDT tombstone garbage collection.
 \end{abstract}
 
 \section{Introduction}
