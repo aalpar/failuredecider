@@ -911,9 +911,12 @@ $D'$ & Spare disk IOPS (total minus normal workload) & IOPS \\
 \end{center}
 
 Under uniform access, the probability of hitting a swapped-out page is $E/W$.
-(Real workloads have locality, so the true fault probability is lower for a
-given $E/W$; the uniform assumption yields a conservative---i.e.,
-smaller---margin $E^*$.)
+Real workloads have locality: under the working set
+model~\cite{denning1968working}, fault rate is near-zero while working sets fit
+in physical memory and spikes when they do not. The uniform assumption smooths
+this transition, yielding a lower bound on $E^*$---the true margin is larger,
+but the failure at the true boundary is sharper than the smooth model depicts.
+The table values below are conservative estimates of the minimum margin.
 Each fault costs 2~IOPS (swap-in read + swap-out write):
 \begin{equation}
   P = \frac{2fE}{W}
