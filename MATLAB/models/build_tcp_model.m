@@ -3,6 +3,10 @@ function build_tcp_model()
 %
 %   Scalar feedback loop: perturbation -> backoff -> convergence.
 %   Demonstrates: Level 1 (1 segment), Level 2 (backoff), Level 3 (G=-0.5).
+%
+%   Parameters are stored in the model workspace and referenced by name.
+%   To change parameters after building:
+%   Model Explorer > Model Workspace > edit values > re-run simulation.
 
     model = 'tcp_model';
 
@@ -16,63 +20,77 @@ function build_tcp_model()
 
     p = tcp_params();
 
+    %% Parameters — set in model workspace for Simulink access
+    hws = get_param(model, 'ModelWorkspace');
+    hws.assignin('C', p.C);
+    hws.assignin('w0', p.w0);
+    hws.assignin('RTO_base', p.RTO_base);
+    hws.assignin('max_retries', p.max_retries);
+    hws.assignin('perturb_mag', p.perturb_mag);
+    hws.assignin('perturb_t', p.perturb_t);
+
     %% Source blocks
-    % add_block copies a block from Simulink's library into our model.
-    % First arg: library path (e.g. 'simulink/Sources/Constant').
-    % Second arg: destination path in our model. 'Position' sets XY coordinates.
+    % Block parameters reference workspace variables by name so users can
+    % change them in Model Explorer without rebuilding the model.
     % Normal workload — constant
     add_block('simulink/Sources/Constant', [model '/w0'], ...
-        'Value', num2str(p.w0), 'Position', [50 100 100 130]);
+        'Value', 'w0', 'Position', [50 100 100 130]);
 
     % Perturbation — pulse at t=perturb_t
     add_block('simulink/Sources/Step', [model '/Perturbation'], ...
-        'Time', num2str(p.perturb_t), ...
-        'Before', '0', 'After', num2str(p.perturb_mag), ...
+        'Time', 'perturb_t', ...
+        'Before', '0', 'After', 'perturb_mag', ...
         'Position', [50 180 100 210]);
 
     % Capacity — constant
     add_block('simulink/Sources/Constant', [model '/C'], ...
-        'Value', num2str(p.C), 'Position', [50 30 100 60]);
+        'Value', 'C', 'Position', [50 30 100 60]);
 
     %% Timeout counter (increments when h < 0, resets when h > threshold)
-    % Model the discrete backoff: k = number of consecutive timeouts
-    % We use a MATLAB Function block for clarity
     % MATLAB Function blocks let you embed custom MATLAB code inside a Simulink model.
     add_block('simulink/User-Defined Functions/MATLAB Function', ...
         [model '/Backoff_Logic'], ...
         'Position', [250 150 400 220]);
 
-    % Set the MATLAB Function code
     % find(slroot,...) locates the Stateflow chart object behind the MATLAB Function
     % block so we can programmatically set its code via the .Script property.
     mf = find(slroot, '-isa', 'Stateflow.EMChart', 'Path', [model '/Backoff_Logic']);
-    % sprintf formats a string (like C's sprintf). The [... \n ...] syntax
-    % concatenates string fragments across lines. %g placeholders get filled
-    % by the trailing arguments (p.RTO_base, p.max_retries).
-    mf.Script = sprintf([...
-        'function [r, rto, k_out] = Backoff_Logic(h, k_prev)\n' ...
-        '%% Exponential backoff retransmission logic.\n' ...
-        '%% h: current headroom (scalar)\n' ...
-        '%% k_prev: previous timeout count\n' ...
-        '%% r: retransmission rate (segments/RTT)\n' ...
-        '%% rto: current RTO\n' ...
-        '%% k_out: updated timeout count\n' ...
-        'RTO_base = %g;\n' ...
-        'max_retries = %g;\n' ...
-        'if h < 0 && k_prev < max_retries\n' ...
-        '    k_out = k_prev + 1;\n' ...
-        'elseif h >= 0 && k_prev > 0\n' ...
-        '    k_out = max(0, k_prev - 1);\n' ...
-        'else\n' ...
-        '    k_out = k_prev;\n' ...
-        'end\n' ...
-        'rto = RTO_base * 2^k_out;\n' ...
-        'if k_out > 0\n' ...
-        '    r = 1 / rto;\n' ...
-        'else\n' ...
-        '    r = 0;\n' ...
-        'end\n'], ...
-        p.RTO_base, p.max_retries);
+
+    % MATLAB Function code references RTO_base and max_retries by name.
+    % Values come from Parameter-scoped data resolved against model workspace.
+    code = {
+        'function [r, rto, k_out] = Backoff_Logic(h, k_prev)'
+        '% Exponential backoff retransmission logic.'
+        '% h: current headroom (scalar)'
+        '% k_prev: previous timeout count'
+        '% r: retransmission rate (segments/RTT)'
+        '% rto: current RTO'
+        '% k_out: updated timeout count'
+        '% Parameters (RTO_base, max_retries) are editable in Model Explorer.'
+        ''
+        'if h < 0 && k_prev < max_retries'
+        '    k_out = k_prev + 1;'
+        'elseif h >= 0 && k_prev > 0'
+        '    k_out = max(0, k_prev - 1);'
+        'else'
+        '    k_out = k_prev;'
+        'end'
+        'rto = RTO_base * 2^k_out;'
+        'if k_out > 0'
+        '    r = 1 / rto;'
+        'else'
+        '    r = 0;'
+        'end'
+    };
+    mf.Script = strjoin(code, newline);
+
+    % Register parameters so the block resolves them from model workspace
+    params = {'RTO_base', 'max_retries'};
+    for i = 1:numel(params)
+        d = Stateflow.Data(mf);
+        d.Name = params{i};
+        d.Scope = 'Parameter';
+    end
 
     %% Memory block to hold k across timesteps
     % Unit Delay holds a value for one timestep — this carries k (timeout count)
