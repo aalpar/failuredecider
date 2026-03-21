@@ -245,16 +245,19 @@ will allocate) depends on external state the kernel does not track.
 The precondition is what separates systems that \emph{can} reason about recovery
 cost from those that act and hope.
 
-\subsubsection{Formal Framework: Bandwidth as Primitive}
+\subsubsection{Modeling Choice: Resources as Rates}
 \label{sec:bandwidth}
 
-Every system resource has a consumption rate expressible as bandwidth:
-\textbf{units of resource per unit time}.
+We model every system resource as a rate---\textbf{units of resource per unit
+time}---following a convention standard in queueing theory and systems
+dynamics~\cite{forrester1961industrial}. The choice is not novel; the reason
+for making it explicit is that the recovery invariant (Section~\ref{sec:invariant})
+constrains rates, not stocks.
 
 \begin{center}
 \begin{tabular}{@{}ll@{}}
 \toprule
-Resource & Bandwidth unit \\
+Resource & Rate unit \\
 \midrule
 Network  & bytes/sec or segments/RTT \\
 Disk I/O & IOPS or bytes/sec \\
@@ -264,12 +267,14 @@ Memory   & pages/sec (fault-in rate) \\
 \end{tabular}
 \end{center}
 
-For pure-flow resources (network, CPU), bandwidth \emph{is} the resource. There
+For pure-flow resources (network, CPU), the rate \emph{is} the resource. There
 is no at-rest state---a CPU cycle is consumed or not, a packet is in flight or
 not.
 
 For stock resources (memory capacity, disk space), the at-rest state is the
-integral of past bandwidth:
+integral of past rates---the \emph{level-rate} relationship formalized by
+Forrester~\cite{forrester1961industrial} (Ch.~6--7, esp.\ Eq.~7-1), the
+foundation of systems dynamics:
 \begin{equation}
   S(t) = \int_0^t b_{\mathrm{net}}(\tau)\,d\tau
 \end{equation}
@@ -278,10 +283,11 @@ rate). Every physical memory page was populated through a page fault---zero-fill
 or disk read---that consumed memory bus bandwidth and potentially disk bandwidth.
 Virtual address space can be reserved without bandwidth (\texttt{malloc} with
 overcommit returns immediately), but physical resource consumption always goes
-through bandwidth.
+through a rate.
 
-This unification matters: the recovery invariant constrains rates. Stocks enter
-only as boundary conditions on accumulated rates.
+This matters for what follows: the gain matrix (Section~\ref{sec:gain-matrix})
+and the spectral radius condition operate on rates. Stocks enter only as boundary
+conditions on accumulated rates.
 
 \subsubsection{Multi-Resource Model}
 \label{sec:multi-resource}
@@ -629,13 +635,35 @@ their consequences become permanent.
 The historical sequence matters. IBM's OS/360 (1964) established mandatory
 compensation boundaries---region sizes, operator-in-the-loop escalation via
 WTO/WTOR---before UNIX existed. UNIX's designers chose a different philosophy:
-permissive defaults, graceful degradation, opt-in resource limits. The
-distributed systems community inherited UNIX's choice wholesale. The formal
-framework presented here provides the mathematical basis for IBM's original
-design: there is a computable boundary $h^*$ below which automated recovery is
-provably safe and above which it is provably intractable under production load.
-IBM enforced this boundary by convention; the framework shows it can be derived
-from measured system parameters.
+permissive defaults, graceful degradation, opt-in resource limits.
+
+Tandem's NonStop architecture (1976) represents a third position: the
+compensation boundary is mandatory---every module must be
+fail-fast---but recovery at the boundary is automated through process pairs
+and transaction replay, not escalated to an
+operator~\cite{gray1985why}. This works because transactions bound
+recovery cost: kill the faulty process, activate the backup, replay the
+log. Gray's empirical analysis of Tandem production failures showed that
+operators were themselves a dominant failure source, motivating their
+removal from the recovery path. The framework presented here clarifies
+where Tandem's assumption holds: when recovery cost is bounded and the
+gain matrix is known, automated failover is the correct action
+(Sections~\ref{sec:swap},~\ref{sec:tcp-hstar}). When recovery cost
+depends on system state not captured by the transaction
+mechanism---the OOM killer cannot evaluate restart cost, Cassandra's
+hint burst recreates the original overload---even fail-fast failover
+inherits the conditions that caused the failure
+(Sections~\ref{sec:cassandra-hstar},~\ref{sec:oom-hstar}).
+
+The distributed systems community inherited UNIX's permissive defaults
+and Tandem's preference for automated recovery---but without Tandem's
+mandatory boundary or bounded recovery cost. The formal framework
+presented here provides the mathematical basis for what IBM enforced by
+convention and Tandem enforced by transaction semantics: there is a
+computable boundary~$h^*$ below which automated recovery is provably safe
+and above which it is provably intractable under production load. The
+framework shows this boundary can be derived from measured system
+parameters.
 
 \section{Decision Authority Tracks Recovery Fitness}
 
@@ -805,7 +833,19 @@ metastable failures across 11 organizations, finding that ${>}50\%$ involved
 retry storms. Isaacs and Alvaro~\cite{isaacs2025analyzing} propose a modeling
 pipeline for discovering susceptibility at design time. The formal analysis by
 Alvaro et al.~\cite{alvaro2025formal} provides a CTMC-based spectral
-characterization of metastable states. This paper approaches the same phenomenon
+characterization of metastable states. Habibi et
+al.~\cite{habibi2024msf} model retry storms in replicated storage using
+a queueing model with an \emph{orbit space}---requests that time out re-enter
+the queue, creating the feedback loop that sustains metastable failure. Their
+orbit mechanism is the stochastic analog of the cross-coupling terms in the
+gain matrix: both capture the same phenomenon (recovery load feeding back into
+system load), but the gain matrix yields a closed-form stability boundary
+($\rho(G) = 1$) while MSF-Model predicts failure probability through
+simulation. Farahbakhsh et al.~\cite{farahbakhsh2025modeling} formalize
+metastability via finite state machines, proving that a feedback cycle is
+necessary for metastability (but not sufficient---a simple queue has a cycle
+yet no metastable states).
+This paper approaches the same phenomenon
 from control theory rather than stochastic processes: the gain matrix asks
 ``does the perturbation converge or diverge?'' where CTMCs ask ``how long does
 the system stay trapped?''
