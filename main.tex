@@ -1255,7 +1255,18 @@ self-rescue. The linear analysis never gives false instability warnings: if
 $\rho(\mathbf{G}) \geq 1$, the system \emph{will} cascade. But it can give
 false assurance of robustness when the basin of attraction is smaller than the
 perturbation. Resistance to large perturbations requires headroom margin beyond
-$\mathbf{h}^*$.\footnote{For exact convergence rates and dynamics near
+$\mathbf{h}^*$.
+
+The ODE~\eqref{eq:recovery-ode} assumes instantaneous feedback---recovery
+demand at time~$t$ depends on headroom at time~$t$. With feedback
+delay~$d$, the dynamics become a delay differential equation and the
+stability region shrinks: even $\rho(\mathbf{G}) < 1$ can produce
+oscillatory instability when $d$ is large relative to~$\tau$. For the
+systems in this paper the assumption is benign: TCP is unconditionally
+stable ($G < 0$, so no finite delay destabilizes it), swap's feedback
+delay is small relative to~$\tau$, and Cassandra's phase transition is so
+violent ($g \approx 3{,}000$) that delay corrections are
+negligible.\footnote{For exact convergence rates and dynamics near
 $\rho(\mathbf{G}) = 1$, Lyapunov stability analysis and the theory of
 cooperative dynamical
 systems~\cite{hirsch1985systems,smith1995monotone} provide stronger quantitative
