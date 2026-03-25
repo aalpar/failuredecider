@@ -205,6 +205,7 @@ failure detector with a specific information boundary, and the system's
 correctness depends on no layer exceeding its boundary.
 
 \section{The Recovery Invariant}
+\label{sec:invariant}
 
 TCP's design is not just good engineering intuition---it satisfies a precise
 invariant that separates safe automatic recovery from cascading failure. The
@@ -899,41 +900,58 @@ TCP congestion dynamics.
 \section{The Gain Matrix: Formalizing the Feedback Bound}
 \label{sec:gain-matrix}
 
-We model recovery dynamics near the operating point as a first-order linearized
-system. The state is the headroom vector $\mathbf{h}(t)$, and the feedback
-structure is captured by the recovery gain matrix.
+We model recovery dynamics near the operating point as a continuous-time
+linearized system. The state is the headroom vector~$\mathbf{h}(t)$, and the
+feedback structure is captured by the recovery gain matrix.
 
 Define the $n \times n$ recovery gain matrix $\mathbf{G}$:
 \begin{equation}
   G_{ij} = \frac{\partial r_i}{\partial (-h_j)}
 \end{equation}
 
-Entry $G_{ij}$ measures how much additional recovery bandwidth appears on
-resource $i$ when headroom on resource $j$ decreases by one unit. For systems
+Entry $G_{ij}$ measures how much additional recovery demand appears on
+resource~$i$ when headroom on resource~$j$ decreases by one unit. For systems
 without backoff, $G_{ij} \geq 0$: less headroom means equal or greater recovery
 demand.
 
-When headroom drops by $\Delta\mathbf{h}$, recovery demand changes by
-$\mathbf{G} \cdot \Delta\mathbf{h}$. For $\mathbf{G} \geq 0$ this is an
-increase (amplifying); for entries $G_{ij} < 0$ (e.g., backoff) it is a
-decrease (stabilizing). In either case the iteration proceeds:
+Recovery acts on the headroom deficit~$\delta\mathbf{h}(t) = \mathbf{h}_{\mathrm{eq}} - \mathbf{h}(t)$.
+Each unit of deficit drives recovery demand proportional to~$\mathbf{G}$; each
+unit of recovery demand reduces the deficit. The net dynamics:
 \begin{equation}
-  \Delta\mathbf{h} \to \mathbf{G} \cdot \Delta\mathbf{h}
-  \to \mathbf{G}^2 \cdot \Delta\mathbf{h} \to \cdots
+  \frac{d(\delta\mathbf{h})}{dt}
+    = \frac{\mathbf{G} - \mathbf{I}}{\tau}\;\delta\mathbf{h}
+  \label{eq:recovery-ode}
 \end{equation}
+where $\tau$ is the characteristic feedback timescale. The
+$\mathbf{G}$~term amplifies (recovery creates secondary demand); the
+$\mathbf{I}$~term damps (recovery processes the deficit). The solution is:
 \begin{equation}
-  \text{Total: } (\mathbf{I} + \mathbf{G} + \mathbf{G}^2 + \cdots)
-  \cdot \Delta\mathbf{h}
-  = (\mathbf{I} - \mathbf{G})^{-1} \cdot \Delta\mathbf{h}
+  \delta\mathbf{h}(t) = e^{(\mathbf{G} - \mathbf{I})t/\tau}\;\delta\mathbf{h}(0)
 \end{equation}
 
-This geometric series converges if and only if $\rho(\mathbf{G}) < 1$, where
-$\rho(\mathbf{G})$ is the spectral radius of $\mathbf{G}$ (the largest absolute
-value among its eigenvalues).
+The system is asymptotically stable when every eigenvalue
+of~$(\mathbf{G} - \mathbf{I})$ has negative real part. For~$\mathbf{G} \geq 0$
+the Perron-Frobenius eigenvalue is real, and the condition reduces to:
 
 \begin{quote}
-\textbf{Stability condition:} $\rho(\mathbf{G}) < 1$.
+\textbf{Stability condition:} $\rho(\mathbf{G}) < 1$ (BIBO stability: bounded
+perturbations produce bounded responses).
 \end{quote}
+
+The cumulative headroom deficit over time confirms this. Integrating the
+impulse response:
+\begin{equation}
+  \int_0^\infty e^{(\mathbf{G} - \mathbf{I})t/\tau}\,dt
+    = \tau\,(\mathbf{I} - \mathbf{G})^{-1}
+    = \tau\,(\mathbf{I} + \mathbf{G} + \mathbf{G}^2 + \cdots)
+\end{equation}
+which converges if and only if~$\rho(\mathbf{G}) < 1$---the Neumann series
+emerges as the steady-state consequence of the continuous dynamics. Prior work on
+discrete-time systems---notably the spectral analysis of TCP congestion control
+by Low et al.~\cite{low2002internet}---arrives at the same condition through
+the convergence of this series directly. TCP's per-timeout backoff
+(\cref{sec:tcp-hstar}) is naturally discrete; the continuous formulation here is
+the general case from which the discrete form follows.
 
 For a single resource, $\mathbf{G}$ is scalar and the condition reduces to
 $|G| < 1$. For multiple resources, the spectral radius captures cross-resource
@@ -1218,10 +1236,12 @@ The gain matrix $\mathbf{G}$ is the Jacobian of the recovery dynamics at the
 current operating point---a local linearization. The nonlinear system's behavior
 near this point is governed by two results.
 
-The linearization is locally valid when no eigenvalue of $\mathbf{G}$ lies on
-the unit circle: $\rho(\mathbf{G}) < 1$ implies local asymptotic stability,
+The linearization is locally valid when no eigenvalue
+of~$(\mathbf{G} - \mathbf{I})$ lies on the imaginary axis---equivalently, when
+no eigenvalue of~$\mathbf{G}$ has real part exactly~$1$.
+$\rho(\mathbf{G}) < 1$ implies local asymptotic stability;
 $\rho(\mathbf{G}) > 1$ implies local
-instability.\footnote{This is the discrete Hartman-Grobman
+instability.\footnote{This is the Hartman-Grobman
 theorem~\cite{hartman1960lemma,grobman1959homeomorphisms,hartman1960local}: the
 nonlinear system's local phase portrait is topologically equivalent to its
 linearization at a hyperbolic fixed point.}
